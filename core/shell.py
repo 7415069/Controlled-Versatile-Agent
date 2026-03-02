@@ -269,106 +269,104 @@ class UniversalShell:
       """).strip()
     return f"{base_prompt}\n\n{law_prompt}"
 
+  # ── LLM 二次确认（结构化输出版）────────────────────────────
+
+  def _make_pre_screen_call(self, req) -> PreScreenResult:
+    """
+    供 EscalationManager 调用。
+    使用 structured_chat（function calling）强制获取结构化判断，零正则解析。
+
+    输出 Schema 通过 function_calling 约束，LLM 必须填充每个字段：
+      - is_necessary: bool
+      - reasoning: str（1-2句判断依据）
+      - alternative: str（不必须时的替代方案）
+    """
+    # from core.escalation import PreScreenResult
+
+    # 二次确认的输出 JSON Schema
+    output_schema = {
+      "type": "object",
+      "properties": {
+        "is_necessary": {
+          "type": "boolean",
+          "description": (
+            "true = 这个越权操作是完成任务的绝对必要条件，在白名单内找不到等价资源；"
+            "false = 可以跳过或用已有权限内的资源替代"
+          ),
+        },
+        "reasoning": {
+          "type": "string",
+          "description": "1-2句话说明判断依据，需具体指出为什么必须或不必须",
+        },
+        "alternative": {
+          "type": "string",
+          "description": "如果 is_necessary=false，给出具体可行的替代方案；is_necessary=true 时填空字符串",
+        },
+      },
+      "required": ["is_necessary", "reasoning", "alternative"],
+    }
+
+    # 把 EscalationRequest 的关键信息拼入 user 消息
+    user_message = (
+      f"请判断以下越权访问请求的必要性：\n\n"
+      f"工具: {req.tool_name}\n"
+      f"目标路径/命令: {req.requested_path}\n"
+      f"权限类型: {req.permission_type}\n"
+      f"Agent 理由: {req.reason or '（未说明）'}\n\n"
+      f"当前任务上下文（最近对话）:\n{req.context_summary or '（无上下文）'}"
+    )
+
+    result = self._llm.structured_chat(
+        messages=[{"role": "user", "content": user_message}],
+        system_prompt=(
+          "你是受控百变智能体（CVA）的安全审计模块。\n"
+          "你的唯一职责：客观判断一个 AI Agent 的越权访问请求是否是完成当前任务的绝对必要条件。\n\n"
+          "判断标准：\n"
+          "- 必须 (is_necessary=true)：没有此资源任务完全无法推进，且白名单内无等价替代\n"
+          "- 不必须 (is_necessary=false)：可跳过/用已有权限替代/调整策略规避，或与任务核心目标关联度低"
+        ),
+        output_schema=output_schema,
+        function_name="submit_necessity_judgment",
+        function_description="提交对越权访问请求必要性的判断结果",
+        max_tokens=512,
+    )
+
+    if result is None:
+      # structured_chat 失败 → 保守策略
+      return PreScreenResult(
+          is_necessary=True,
+          reasoning="structured_chat 调用失败，保守升级到人类审批。",
+      )
+
+    return PreScreenResult(
+        is_necessary=bool(result.get("is_necessary", True)),
+        reasoning=str(result.get("reasoning", "")),
+        alternative=str(result.get("alternative", "")),
+    )
+
+  def _context_summary(self, last_n: int = 6) -> str:
+    """提取最近 N 轮 user/assistant 文本摘要，跳过 tool_result。"""
+    msgs = self._memory.messages
+    recent = msgs[-last_n:] if len(msgs) > last_n else msgs
+    lines = []
+    for m in recent:
+      role = m.get("role", "")
+      if role not in ("user", "assistant"):
+        continue
+      content = m.get("content", "")
+      if isinstance(content, list):
+        text = " ".join(
+            b.get("text", "") or b.get("content", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") in ("text", None)
+        ).strip()
+      else:
+        text = str(content or "").strip()
+      if text:
+        lines.append(f"[{'用户' if role == 'user' else '助手'}] {text[:150]}")
+    return "\n".join(lines)
+
 
 def _hash(text: str) -> str:
   import hashlib
   return hashlib.sha256(text.encode()).hexdigest()[:16]
-
-
-# ── LLM 二次确认（结构化输出版）────────────────────────────
-
-def _make_pre_screen_call(self, req) -> PreScreenResult:
-  """
-  供 EscalationManager 调用。
-  使用 structured_chat（function calling）强制获取结构化判断，零正则解析。
-
-  输出 Schema 通过 function_calling 约束，LLM 必须填充每个字段：
-    - is_necessary: bool
-    - reasoning: str（1-2句判断依据）
-    - alternative: str（不必须时的替代方案）
-  """
-  # from core.escalation import PreScreenResult
-
-  # 二次确认的输出 JSON Schema
-  output_schema = {
-    "type": "object",
-    "properties": {
-      "is_necessary": {
-        "type": "boolean",
-        "description": (
-          "true = 这个越权操作是完成任务的绝对必要条件，在白名单内找不到等价资源；"
-          "false = 可以跳过或用已有权限内的资源替代"
-        ),
-      },
-      "reasoning": {
-        "type": "string",
-        "description": "1-2句话说明判断依据，需具体指出为什么必须或不必须",
-      },
-      "alternative": {
-        "type": "string",
-        "description": "如果 is_necessary=false，给出具体可行的替代方案；is_necessary=true 时填空字符串",
-      },
-    },
-    "required": ["is_necessary", "reasoning", "alternative"],
-  }
-
-  # 把 EscalationRequest 的关键信息拼入 user 消息
-  user_message = (
-    f"请判断以下越权访问请求的必要性：\n\n"
-    f"工具: {req.tool_name}\n"
-    f"目标路径/命令: {req.requested_path}\n"
-    f"权限类型: {req.permission_type}\n"
-    f"Agent 理由: {req.reason or '（未说明）'}\n\n"
-    f"当前任务上下文（最近对话）:\n{req.context_summary or '（无上下文）'}"
-  )
-
-  result = self._llm.structured_chat(
-      messages=[{"role": "user", "content": user_message}],
-      system_prompt=(
-        "你是受控百变智能体（CVA）的安全审计模块。\n"
-        "你的唯一职责：客观判断一个 AI Agent 的越权访问请求是否是完成当前任务的绝对必要条件。\n\n"
-        "判断标准：\n"
-        "- 必须 (is_necessary=true)：没有此资源任务完全无法推进，且白名单内无等价替代\n"
-        "- 不必须 (is_necessary=false)：可跳过/用已有权限替代/调整策略规避，或与任务核心目标关联度低"
-      ),
-      output_schema=output_schema,
-      function_name="submit_necessity_judgment",
-      function_description="提交对越权访问请求必要性的判断结果",
-      max_tokens=512,
-  )
-
-  if result is None:
-    # structured_chat 失败 → 保守策略
-    return PreScreenResult(
-        is_necessary=True,
-        reasoning="structured_chat 调用失败，保守升级到人类审批。",
-    )
-
-  return PreScreenResult(
-      is_necessary=bool(result.get("is_necessary", True)),
-      reasoning=str(result.get("reasoning", "")),
-      alternative=str(result.get("alternative", "")),
-  )
-
-
-def _context_summary(self, last_n: int = 6) -> str:
-  """提取最近 N 轮 user/assistant 文本摘要，跳过 tool_result。"""
-  msgs = self._memory.messages
-  recent = msgs[-last_n:] if len(msgs) > last_n else msgs
-  lines = []
-  for m in recent:
-    role = m.get("role", "")
-    if role not in ("user", "assistant"):
-      continue
-    content = m.get("content", "")
-    if isinstance(content, list):
-      text = " ".join(
-          b.get("text", "") or b.get("content", "")
-          for b in content
-          if isinstance(b, dict) and b.get("type") in ("text", None)
-      ).strip()
-    else:
-      text = str(content or "").strip()
-    if text:
-      lines.append(f"[{'用户' if role == 'user' else '助手'}] {text[:150]}")
-  return "\n".join(lines)
