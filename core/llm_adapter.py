@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, TypeVar
+from typing import Dict, List, Optional, TypeVar, cast, Any
 
 import litellm
 from litellm import completion
@@ -135,11 +135,21 @@ class LLMAdapter:
 
   def _do_chat_call(self, messages, system_prompt, tools, max_tokens, temperature):
     full_messages = [{"role": "system", "content": system_prompt}] + messages
-    kwargs = {"model": self._model, "messages": full_messages, "max_tokens": min(max_tokens, self._max_output_tokens), "temperature": temperature, "timeout": self._timeout, **self._extra_kwargs}
+    kwargs = {
+      "model": self._model,
+      "messages": full_messages,
+      "max_tokens": min(max_tokens, self._max_output_tokens),
+      "temperature": temperature,
+      "timeout": self._timeout,
+      **self._extra_kwargs
+    }
     if tools:
       kwargs["tools"] = _convert_tools_to_litellm(tools)
       kwargs["tool_choice"] = "auto"
-    return self._parse_response(completion(**kwargs))
+
+    # 消除警告
+    res = completion(**kwargs)
+    return self._parse_response(cast(Any, res))
 
   def _do_structured_call(self, messages, system_prompt, output_schema, function_name, function_description, max_tokens, temperature):
     forced_tool = [{"type": "function", "function": {"name": function_name, "description": function_description, "parameters": output_schema}}]
