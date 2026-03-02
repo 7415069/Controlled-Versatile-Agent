@@ -11,7 +11,7 @@
 
 ```
 cva/
-├── cva.py                    # 主入口
+├── cv-agent.py                    # 主入口
 ├── requirements.txt
 ├── core/
 │   ├── manifest.py           # Role Manifest 加载与校验

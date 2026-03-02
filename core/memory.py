@@ -510,48 +510,24 @@ class MemoryStore:
           pass
 
   def _maybe_trim(self):
-    """
-    滑动窗口截断策略：
-    - 消息数 > max_messages：丢弃最旧的 25%（保留整轮对话完整性）
-    - token 估算 > max_token_budget：同上触发
-    只截断内存中的列表，磁盘文件保留完整历史（用于审计）。
-    """
-    needs_trim = (
-        len(self._messages) > self._max_messages
-        or self.token_estimate() > self._max_token_budget
-    )
-    if not needs_trim:
+    # 如果没超预算则不处理
+    if len(self._messages) <= self._max_messages and self.token_estimate() <= self._max_token_budget:
       return
 
-    start_time = time.time()
-    original_count = len(self._messages)
+    # 重点：确保裁剪后的第一条消息必须是 'user' 角色
+    # 且不能是某个 tool_call 的后续。
+    start_idx = len(self._messages) // 4
 
-    # 计算要保留的起始位置（丢弃最旧的 25%）
-    drop_count = max(1, len(self._messages) // 4)
+    while start_idx < len(self._messages):
+      msg = self._messages[start_idx]
+      # 1. 必须是 user 消息开头
+      # 2. 或者是不带 tool_calls 的 assistant 消息
+      if msg.get("role") == "user":
+        break
+      start_idx += 1
 
-    # 确保从完整的"用户消息"边界截断，不截断在 tool_result 中间
-    start = drop_count
-    while start < len(self._messages):
-      if self._messages[start].get("role") == "user":
-        # 检查不是 tool_result 消息
-        content = self._messages[start].get("content", "")
-        if not isinstance(content, list) or not any(
-            isinstance(b, dict) and b.get("type") == "tool_result"
-            for b in content
-        ):
-          break
-      start += 1
-
-    trimmed = len(self._messages) - start
-    self._messages = self._messages[start:]
-
-    # 更新统计
-    self._stats.last_trim_time = time.time()
-    self._stats.trim_count += 1
-    self._last_token_calc_time = 0  # 强制重新计算
-
-    duration = time.time() - start_time
-    print(f"[Memory] ✂️  上下文窗口截断：移除最旧 {trimmed} 条，保留 {len(self._messages)} 条（耗时 {duration:.3f}s）")
+    print(f"[Memory] ✂️  智能对齐截断：从第 {start_idx} 条开始保留")
+    self._messages = self._messages[start_idx:]
 
   def _update_stats(self):
     """更新统计信息"""

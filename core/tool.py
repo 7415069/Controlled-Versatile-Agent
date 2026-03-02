@@ -6,7 +6,6 @@
 - 优化文件大小检查逻辑
 - 降低默认文件读取限制：50000 -> 30000字符，节省token
 """
-
 import glob as glob_module
 import os
 import shlex
@@ -66,6 +65,160 @@ class Tool:
 
 
 # ─── 具体工具实现 ─────────────────────────────────────────────
+class FindSymbolTool(Tool):
+  name = "find_symbol"
+  description = "【全屏搜索】在整个项目中定位某个类或函数的定义位置。当你看到一个调用却不知道它在哪个文件时必用。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "symbol_name": {"type": "string", "description": "类名或函数名"},
+      "reason": {"type": "string"}
+    },
+    "required": ["symbol_name"]
+  }
+
+  def execute(self, symbol_name: str, reason: str = "", **kwargs) -> Dict:
+    # 权限检查（通常允许在项目范围内搜索）
+    allowed, msg = self._check(self.name, ".", "read", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    import re
+    # 匹配 class Symbol 或 def Symbol 或 function Symbol
+    pattern = re.compile(rf'^\s*(?:class|def|function|func|async\s+function)\s+{symbol_name}\b', re.MULTILINE)
+    results = []
+
+    # 遍历项目（复用之前的安全路径逻辑）
+    for root, dirs, files in os.walk("."):
+      # 排除干扰目录
+      dirs[:] = [d for d in dirs if not d.startswith(('.', '__pycache__', 'node_modules'))]
+      for file in files:
+        if not file.endswith(('.py', '.js', '.ts', '.go', '.java', '.cpp')):
+          continue
+
+        path = os.path.join(root, file)
+        try:
+          with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+            if pattern.search(content):
+              results.append({"path": path, "type": "definition"})
+        except:
+          continue
+
+    return ok({"symbol": symbol_name, "found_in": results})
+
+
+class GetProjectTreeTool(Tool):
+  name = "get_project_tree"
+  description = "一次性获取整个项目的目录结构树。比多次调用 list_directory 更省 Token。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "根目录", "default": "."},
+      "depth": {"type": "integer", "description": "递归深度", "default": 3},
+      "reason": {"type": "string"}
+    }
+  }
+
+  def execute(self, path: str = ".", depth: int = 3, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "list", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    real_path = self._secure_path(path)
+    tree = []
+
+    def walk(current_path, current_depth):
+      if current_depth > depth:
+        return None
+      try:
+        for entry in sorted(os.scandir(current_path)):
+          if entry.name.startswith(('.', '__pycache__', 'node_modules')):
+            continue
+
+          is_dir = entry.is_dir()
+          item = {"name": entry.name, "type": "dir" if is_dir else "file"}
+          if is_dir:
+            item["children"] = walk(entry.path, current_depth + 1)
+          tree.append(item)
+      except Exception:
+        pass
+      return tree
+
+    result = walk(real_path, 1)
+    return ok({"tree": result})
+
+
+class GetFileSkeletonTool(Tool):
+  name = "get_file_skeleton"
+  description = "【省Token神器】只提取 Python 文件的类名、方法名及签名，不读取函数体。在了解代码结构时必用。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "文件路径"},
+      "reason": {"type": "string"}
+    },
+    "required": ["path"]
+  }
+
+  def execute(self, path: str, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    real_path = self._secure_path(path)
+    ext = os.path.splitext(real_path)[1].lower()
+
+    try:
+      with open(real_path, "r", encoding="utf-8") as f:
+        source = f.read()
+
+      if ext == ".py":
+        return ok({"path": path, "skeleton": self._get_python_skeleton(source)})
+      else:
+        # 对 C-style 语言 (JS, TS, C, Java, Go) 使用通用的正则提取
+        return ok({"path": path, "skeleton": self._get_generic_skeleton(source)})
+    except Exception as e:
+      return err("PARSE_ERROR", str(e))
+
+  def _get_python_skeleton(self, source: str) -> str:
+    import ast
+    tree = ast.parse(source)
+    skeleton = []
+
+    # ─── 新增：提取导入关系 ───
+    imports = []
+    for node in ast.iter_child_nodes(tree):
+      if isinstance(node, ast.Import):
+        for alias in node.names:
+          imports.append(f"import {alias.name}")
+      elif isinstance(node, ast.ImportFrom):
+        imports.append(f"from {node.module} import {', '.join([n.name for n in node.names])}")
+
+    if imports:
+      skeleton.append("### Dependencies\n" + "\n".join(imports))
+
+    # ─── 原有的类和函数提取 ───
+    for node in ast.iter_child_nodes(tree):
+      if isinstance(node, ast.ClassDef):
+        # 记录继承关系，比如 class A(B):
+        bases = [ast.unparse(b) for b in node.bases]
+        base_str = f"({', '.join(bases)})" if bases else ""
+        methods = [f"  def {m.name}(...): ..." for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        skeleton.append(f"class {node.name}{base_str}:\n" + "\n".join(methods))
+      elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        skeleton.append(f"def {node.name}(...): ...")
+
+    return "\n\n".join(skeleton)
+
+  def _get_generic_skeleton(self, source: str) -> str:
+    """基于正则的通用大纲提取（匹配函数和类声明）"""
+    import re
+    # 匹配大多数语言中类似 function name(...) 或 class Name {...} 的结构
+    pattern = re.compile(r'^ *(?:export +)?(?:class|function|def|async +function|public|private|static) +([a-zA-Z_][a-zA-Z0-9_]*)', re.MULTILINE)
+    matches = pattern.findall(source)
+    return "\n".join([f"{m} ..." for m in matches])
+
 
 class ListDirectoryTool(Tool):
   name = "list_directory"
@@ -118,62 +271,59 @@ class ListDirectoryTool(Tool):
 
 class ReadFileTool(Tool):
   name = "read_file"
-  description = "读取文件内容。返回结构化的 JSON，包含元数据和全文。请注意，为了节省 Token，旧的文件记忆可能会被底座自动脱水压缩。"
+  description = "读取文件内容。支持行范围读取以节省 Token。"
   input_schema = {
     "type": "object",
     "properties": {
-      "path": {"type": "string", "description": "完整路径"},
-      "reason": {"type": "string", "description": "【关键】如果路径可能越权，请提供申请理由"},
-      "encoding": {"type": "string", "description": "文件编码（默认 utf-8）"},
-      "max_chars": {"type": "integer", "description": "最大读取字符数（默认 50000）"},
+      "path": {"type": "string", "description": "文件路径"},
+      "reason": {"type": "string", "description": "读取原因"},
+      "start_line": {"type": "integer", "description": "起始行 (从1开始)", "default": 1},
+      "end_line": {"type": "integer", "description": "结束行"},
+      "encoding": {"type": "string", "default": "utf-8"}
     },
-    "required": ["path", "reason"],  # 强制要求理由
+    "required": ["path", "reason"],
   }
 
-  # 文件大小限制常量
-  MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
-
-  def execute(self, path: str, encoding: str = "utf-8",
-      max_chars: int = 30000, reason: str = "", **kwargs) -> Dict:
+  def execute(self, path: str, start_line: int = 1, end_line: Optional[int] = None,
+      encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
     real_path = self._secure_path(path)
-    if real_path is None:
-      return err("INVALID_PATH", f"路径不安全或无效: {path}")
-
-    if not os.path.exists(real_path):
-      return err("NOT_FOUND", f"文件不存在: {path}")
-    if os.path.isdir(real_path):
-      return err("IS_A_DIRECTORY", f"路径是目录，请使用 list_directory: {path}")
+    if real_path is None or not os.path.exists(real_path):
+      return err("NOT_FOUND", "文件不存在")
 
     try:
-      size = os.path.getsize(real_path)
-      # 安全检查：限制读取的文件大小
-      if size > self.MAX_FILE_SIZE:
-        return err("FILE_TOO_LARGE", f"文件过大（{size} bytes），超过限制（{self.MAX_FILE_SIZE} bytes）")
+      # 为了安全，我们还是需要检查文件物理大小，防止内存溢出
+      if os.path.getsize(real_path) > 100 * 1024 * 1024:
+        return err("FILE_TOO_LARGE", "文件超过100MB，请先用搜索或大纲工具查看")
 
       with open(real_path, "r", encoding=encoding, errors="replace") as f:
-        content = f.read(max_chars)
+        # 优化：如果是大文件且只需要读几行，不要用 readlines()
+        # 这里为了简单先用这个，对于 10MB 以下文件没问题
+        lines = f.readlines()
 
-      # ─── 结构化 Artifact 返回 ───
-      artifact = {
+      total_lines = len(lines)
+      effective_end = end_line if end_line else total_lines
+
+      # 边界修正
+      start_idx = max(0, start_line - 1)
+      end_idx = min(total_lines, effective_end)
+
+      content = "".join(lines[start_idx:end_idx])
+
+      return ok({
         "artifact_type": "file_content",
         "metadata": {
           "path": real_path,
-          "size": size,
-          "encoding": encoding,
-          "is_full_text": True,
-          "read_at": time.time()
+          "range": f"{start_idx + 1}-{end_idx}",
+          "total_lines": total_lines,
+          "is_full_text": (start_idx == 0 and end_idx == total_lines)
         },
         "content": content
-      }
-      return ok(artifact)
-
-    except UnicodeDecodeError:
-      return err("DECODE_ERROR", f"文件编码错误，尝试指定 encoding 参数")
-    except OSError as e:
+      })
+    except Exception as e:
       return err("IO_ERROR", str(e))
 
 
@@ -560,6 +710,9 @@ class HttpRequestTool(Tool):
 # ─── 工具注册表 ───────────────────────────────────────────────
 
 TOOL_REGISTRY = {
+  "find_symbol": FindSymbolTool,
+  "get_project_tree": GetProjectTreeTool,  # 注册
+  "get_file_skeleton": GetFileSkeletonTool,  # 注册
   "list_directory": ListDirectoryTool,
   "read_file": ReadFileTool,
   "backup_file": BackupFileTool,

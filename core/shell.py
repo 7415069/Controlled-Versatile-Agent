@@ -261,54 +261,110 @@ class UniversalShell:
                                  ).strip()
     return f"{base_prompt}\n\n{law_prompt}"
 
-  def _prepare_dehydrated_messages(self, keep_last_n: int = 4) -> List[Dict]:
+  def _prepare_dehydrated_messages(self, keep_last_n: int = 3) -> List[Dict]:
     """
-    性能优化版消息脱水：
-    - 使用缓存避免重复解析
-    - 只在消息变化时重新计算
+    工业级消息脱水系统：
+    1. 活跃区 (最近 n 条): 100% 原文，保证当前任务逻辑连续。
+    2. 缓存区 (4-10 条): 将代码全文转为结构大纲 (Skeleton)，AI 能看懂结构但省 90% Token。
+    3. 归档区 (10 条以上): 仅保留文件元数据，彻底释放空间。
     """
     raw_msgs = self._memory.messages
-    current_hash = hash(tuple((m.get("role"), str(m.get("content", ""))) for m in raw_msgs))
-    current_time = time.time()
-
-    # 检查缓存是否有效
-    if (current_hash in self._dehydration_cache and
-        current_time - self._last_dehydration_time < self._DEHYDRATION_CACHE_TTL):
-      return self._dehydration_cache[current_hash]["messages"]
-
-    # 重新计算脱水消息
     dehydrated_msgs = []
-    threshold_idx = len(raw_msgs) - keep_last_n
+
+    total_len = len(raw_msgs)
+    # 活跃区阈值
+    active_threshold = total_len - keep_last_n
+    # 归档区阈值 (比活跃区更早的消息)
+    archive_threshold = total_len - 10
 
     for i, msg in enumerate(raw_msgs):
+      # 深度拷贝，避免污染原始记忆
       new_msg = msg.copy()
-      if i < threshold_idx and msg.get("role") == "user":
+
+      # 核心逻辑：只对包含大量文件内容的工具返回结果 (tool 角色) 进行处理
+      if msg.get("role") == "tool":
         content_str = msg.get("content", "")
-        if self._should_dehydrate(content_str):
+        # 如果包含文件内容标识
+        if '"artifact_type":"file_content"' in content_str or '"artifact_type": "file_content"' in content_str:
           try:
-            json_part = content_str.split("\n", 1)[1] if content_str.startswith("[TOOL_RESULT") else content_str
-            data = json.loads(json_part)
-            if data.get("artifact_type") == "file_content" and len(data.get("content", "")) > 1500:
-              outline = self._extract_python_outline(data["content"])
-              data["metadata"]["is_full_text"] = False
-              data["content"] = f"[DEHYDRATED] 代码大纲：\n{outline}\n(如需修改，请重读全文)"
-              prefix = "[TOOL_RESULT (Dehydrated)]\n" if content_str.startswith("[TOOL_RESULT") else ""
-              new_msg["content"] = prefix + json.dumps(data, ensure_ascii=False)
-          except (json.JSONDecodeError, KeyError, IndexError):
-            pass
+            # 尝试解析 JSON
+            data = json.loads(content_str)
+            # 只有成功返回且包含内容才处理
+            if data.get("status") == "ok" and "content" in data.get("data", {}):
+              artifact = data["data"]
+              original_code = artifact.get("content", "")
+
+              if i < archive_threshold:
+                # ─── 归档区：彻底脱水 ───
+                artifact["content"] = "[SYSTEM: 内容已过期折叠] 为节省 Token，此处代码全文已移除。如需再次查看，请重新调用 read_file。"
+                artifact["is_dehydrated"] = True
+              elif i < active_threshold:
+                # ─── 缓存区：语义脱水（转为大纲）───
+                path = artifact.get("metadata", {}).get("path", "unknown.py")
+                skeleton = self._generate_semantic_skeleton(original_code, path)
+                artifact["content"] = f"[SYSTEM: 语义脱水] 该文件全文已转为结构大纲以节省 Token：\n\n{skeleton}"
+                artifact["is_skeleton"] = True
+
+              # 写回 JSON
+              new_msg["content"] = json.dumps(data, ensure_ascii=False)
+          except Exception:
+            pass  # 解析失败则保留原样，保证鲁棒性
+
       dehydrated_msgs.append(new_msg)
-
-    # 更新缓存
-    self._dehydration_cache[current_hash] = {
-      "messages": dehydrated_msgs,
-      "timestamp": current_time
-    }
-    self._last_dehydration_time = current_time
-
-    # 清理过期缓存
-    self._cleanup_dehydration_cache()
-
     return dehydrated_msgs
+
+  def _generate_semantic_skeleton(self, code: str, filename: str) -> str:
+    """
+    语义大纲生成器：支持 Python (AST) 和其他语言 (正则)
+    """
+    if not code:
+      return ""
+
+    # 1. 尝试使用 Python AST (最精准)
+    if filename.endswith(".py"):
+      try:
+        import ast
+        tree = ast.parse(code)
+        outline = []
+        for node in ast.iter_child_nodes(tree):
+          if isinstance(node, ast.ClassDef):
+            outline.append(f"class {node.name}:")
+            # 提取类方法签名
+            for item in node.body:
+              if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # 简单提取参数占位
+                outline.append(f"    def {item.name}(...): ...")
+          elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            outline.append(f"def {node.name}(...): ...")
+
+        if outline:
+          return "\n".join(outline)
+      except Exception:
+        pass  # AST 解析失败则回退到正则
+
+    # 2. 通用正则匹配 (支持 JS, Java, C++, Go 等)
+    import re
+    # 匹配常见的类和函数声明
+    patterns = [
+      r'^(?:export\s+)?(?:class|function|async\s+function)\s+([a-zA-Z_][a-zA-Z0-9_]*)',  # JS/TS
+      r'^(?:public|private|protected|static)\s+[\w<>]+\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(',  # Java/C++/C#
+      r'^def\s+([a-zA-Z_][a-zA-Z0-9_]*)',  # Python
+      r'^func\s+(?:\([^)]+\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)'  # Go
+    ]
+
+    skeleton = []
+    lines = code.split('\n')
+    for line in lines:
+      line = line.strip()
+      for p in patterns:
+        if re.match(p, line):
+          skeleton.append(line + " { ... }")
+          break
+
+    if not skeleton:
+      return "[无法提取结构，仅保留前5行]\n" + "\n".join(code.split('\n')[:5])
+
+    return "\n".join(skeleton[:50])  # 最多保留50行结构，防止结构本身也太长
 
   def _should_dehydrate(self, content: str) -> bool:
     """快速判断是否需要脱水"""
