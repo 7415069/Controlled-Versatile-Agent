@@ -195,7 +195,7 @@ class UniversalShell:
     line_content = f"  {label:<10}: {value}"
     vlen = self._visual_len(line_content)
     padding = " " * max(0, width - vlen)
-    return f"║{line_content}{padding}║"
+    return f"║ {line_content}{padding} ║"
 
   def _print_banner(self):
     m = self._manifest

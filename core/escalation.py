@@ -12,7 +12,6 @@ import fnmatch
 import sys
 import threading
 import uuid
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -83,7 +82,7 @@ class EscalationManager:
     self._audit = audit_log_fn
     self._llm_call = llm_call_fn
     self._permission_ttl_hours = permission_ttl_hours
-    
+
     self._pending: Dict[str, EscalationRequest] = {}
     self._approval_history: List[ApprovalRecord] = []  # 审批历史
     self._lock = threading.Lock()
@@ -120,7 +119,7 @@ class EscalationManager:
 
     # 4. 创建新的越权申请
     req = self._create_request(tool_name, target, permission_type, reason, context_summary)
-    
+
     # 5. LLM 二次确认
     pre_screen = self._llm_pre_screen(req)
     req.llm_pre_screen_result = "necessary" if pre_screen.is_necessary else "unnecessary"
@@ -143,17 +142,17 @@ class EscalationManager:
       req = self._pending.get(request_id)
       if not req:
         return
-      
+
       req.status = EscalationStatus.APPROVED
       req.decision_time = datetime.now(timezone.utc).isoformat()
-      
+
       # 设置权限过期时间
       expires_at = datetime.now(timezone.utc) + timedelta(hours=self._permission_ttl_hours)
       req.expires_at = expires_at.isoformat()
-      
+
       paths = approved_paths if approved_paths else [req.requested_path]
       req.approved_paths = paths
-      
+
       # 授予权限
       if req.permission_type in ("read", "list"):
         self._perm.grant_read(paths)
@@ -162,10 +161,10 @@ class EscalationManager:
         self._perm.grant_read(paths)
       elif req.permission_type == "shell":
         self._perm.grant_shell(paths)
-      
+
       # 记录审批历史
       self._record_approval(req)
-      
+
       self._audit("ESCALATION_APPROVED", {
         "request_id": request_id,
         "approved_paths": paths,
@@ -186,11 +185,11 @@ class EscalationManager:
     """清理过期的权限"""
     with self._lock:
       expired_records = [r for r in self._approval_history if self._is_expired(r)]
-      
+
       for record in expired_records:
         self._revoke_expired_permission(record)
         self._approval_history.remove(record)
-        
+
         self._audit("PERMISSION_EXPIRED", {
           "request_id": record.request_id,
           "tool_name": record.tool_name,
@@ -234,19 +233,19 @@ class EscalationManager:
 
       # ─── 修复：让弹窗真正居中 ───
       root.update_idletasks()
-      
+
       # 获取屏幕宽高
       screen_width = root.winfo_screenwidth()
       screen_height = root.winfo_screenheight()
-      
+
       # 设置一个合理的窗口大小（用于计算居中位置）
       window_width = 500
       window_height = 300
-      
+
       # 计算居中位置（窗口中心 = 屏幕中心）
       x = (screen_width - window_width) // 2
       y = (screen_height - window_height) // 2
-      
+
       # 设置窗口位置
       root.geometry(f"{window_width}x{window_height}+{x}+{y}")
       # ─────────────────────────
@@ -264,7 +263,7 @@ class EscalationManager:
           parent=root  # 绑定到已定位的 root
       )
 
-      if choice is True:
+      if choice:
         root.destroy()
         self.approve(req.request_id)
         return True, ""
@@ -348,12 +347,12 @@ class EscalationManager:
 
   def _create_request(self, tool_name, target, permission_type, reason, context_summary) -> EscalationRequest:
     req = EscalationRequest(
-      request_id=str(uuid.uuid4()),
-      tool_name=tool_name,
-      requested_path=target,
-      permission_type=permission_type,
-      reason=reason,
-      context_summary=context_summary
+        request_id=str(uuid.uuid4()),
+        tool_name=tool_name,
+        requested_path=target,
+        permission_type=permission_type,
+        reason=reason,
+        context_summary=context_summary
     )
     with self._lock:
       self._pending[req.request_id] = req
@@ -387,17 +386,17 @@ class EscalationManager:
   def _record_approval(self, req: EscalationRequest):
     """记录审批历史"""
     record = ApprovalRecord(
-      request_id=req.request_id,
-      tool_name=req.tool_name,
-      requested_path=req.requested_path,
-      permission_type=req.permission_type,
-      status=req.status,
-      approved_at=req.decision_time or datetime.now(timezone.utc).isoformat(),
-      expires_at=req.expires_at,
-      approved_paths=req.approved_paths
+        request_id=req.request_id,
+        tool_name=req.tool_name,
+        requested_path=req.requested_path,
+        permission_type=req.permission_type,
+        status=req.status,
+        approved_at=req.decision_time or datetime.now(timezone.utc).isoformat(),
+        expires_at=req.expires_at,
+        approved_paths=req.approved_paths
     )
     self._approval_history.append(record)
-    
+
     # 限制历史记录数量
     if len(self._approval_history) > 1000:
       self._approval_history = self._approval_history[-500:]
