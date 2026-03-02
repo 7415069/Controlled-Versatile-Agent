@@ -25,7 +25,7 @@ init_permissions:
     - "./*.json"
     - "./*.yaml"
     - "./*.toml"
-  write: []
+  write: [ ]
   shell:
     - "git log"
     - "git diff"
