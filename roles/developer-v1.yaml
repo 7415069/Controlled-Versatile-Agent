@@ -18,6 +18,12 @@ identity_prompt: |
   - 如果修改可能导致系统崩溃（如修改 shell.py 的循环逻辑），请务必通过 ask_human 告知导师。
 
 init_permissions:
+  list:
+    - "./core"         # 允许列出 core 目录本身
+    - "./core/**"      # 允许列出 core 内部的子目录
+    - "./roles"
+    - "./tests"
+    - "."              # 允许列出当前根目录
   read:
     - "./core/**"      # 允许读取核心框架代码
     - "./roles/**"     # 允许查看角色定义

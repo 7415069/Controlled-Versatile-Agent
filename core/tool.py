@@ -39,12 +39,23 @@ class Tool:
     """
     self._check = check_fn
 
-  def execute(self, **kwargs) -> Dict:
-    raise NotImplementedError
-
   def _ctx(self, kwargs: dict) -> str:
     """从 execute kwargs 中提取对话上下文摘要（由 shell._dispatch_tool 注入）"""
     return kwargs.get("_context_summary", "")
+
+  def _secure_path(self, path: str) -> Optional[str]:
+    try:
+      expanded = os.path.expanduser(path)
+      abs_path = os.path.abspath(expanded)
+      norm_path = os.path.normpath(abs_path)
+      if any(char in norm_path for char in ['\x00', '\n', '\r']):
+        return None
+      return norm_path
+    except (ValueError, OSError):
+      return None
+
+  def execute(self, **kwargs) -> Dict:
+    raise NotImplementedError
 
   def to_api_spec(self) -> Dict:
     return {
@@ -103,24 +114,6 @@ class ListDirectoryTool(Tool):
       return ok({"path": real_path, "entries": entries, "count": len(entries)})
     except PermissionError as e:
       return err("OS_PERMISSION_DENIED", str(e))
-
-  def _secure_path(self, path: str) -> Optional[str]:
-    """安全的路径规范化，防止路径穿越和符号链接攻击"""
-    try:
-      # 展开用户目录并规范化
-      expanded = os.path.expanduser(path)
-      # 获取绝对路径
-      abs_path = os.path.abspath(expanded)
-      # 规范化路径（解析 .. 和 .）
-      norm_path = os.path.normpath(abs_path)
-
-      # 检查路径是否包含危险字符
-      if any(char in norm_path for char in ['\x00', '\n', '\r']):
-        return None
-
-      return norm_path
-    except (ValueError, OSError):
-      return None
 
 
 class ReadFileTool(Tool):
@@ -183,17 +176,56 @@ class ReadFileTool(Tool):
     except OSError as e:
       return err("IO_ERROR", str(e))
 
-  def _secure_path(self, path: str) -> Optional[str]:
-    """安全的路径规范化"""
+
+class BackupFileTool(Tool):
+  name = "backup_file"
+  description = "为指定文件创建带有时间戳的备份副本。建议在执行 write_file 等破坏性操作前调用。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "要备份的文件路径"},
+      "reason": {"type": "string", "description": "备份原因（例如：修改配置文件前的自动备份）"},
+    },
+    "required": ["path"],
+  }
+
+  def execute(self, path: str, reason: str = "破坏性修改前的自动备份", **kwargs) -> Dict:
+    # 1. 权限检查（备份需要读权限）
+    allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    # 2. 路径安全检查
+    real_path = self._secure_path(path)
+    if real_path is None:
+      return err("INVALID_PATH", f"路径不安全或无效: {path}")
+
+    if not os.path.exists(real_path):
+      return err("NOT_FOUND", f"源文件不存在: {path}")
+    if os.path.isdir(real_path):
+      return err("IS_A_DIRECTORY", f"路径是目录，无法直接备份: {path}")
+
     try:
-      expanded = os.path.expanduser(path)
-      abs_path = os.path.abspath(expanded)
-      norm_path = os.path.normpath(abs_path)
-      if any(char in norm_path for char in ['\x00', '\n', '\r']):
-        return None
-      return norm_path
-    except (ValueError, OSError):
-      return None
+      import datetime
+      import shutil
+
+      # 3. 生成带时间戳的备份路径
+      # 格式: 原文件名.20231027103000.bak
+      timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+      backup_path = f"{real_path}.{timestamp}.bak"
+
+      # 4. 执行物理复制 (copy2 会尝试保留元数据)
+      shutil.copy2(real_path, backup_path)
+
+      return ok({
+        "original_path": real_path,
+        "backup_path": backup_path,
+        "timestamp": timestamp,
+        "size": os.path.getsize(backup_path)
+      })
+
+    except Exception as e:
+      return err("BACKUP_ERROR", f"备份失败: {str(e)}")
 
 
 class WriteFileTool(Tool):
@@ -247,17 +279,6 @@ class WriteFileTool(Tool):
     except OSError as e:
       return err("IO_ERROR", str(e))
 
-  def _secure_path(self, path: str) -> Optional[str]:
-    try:
-      expanded = os.path.expanduser(path)
-      abs_path = os.path.abspath(expanded)
-      norm_path = os.path.normpath(abs_path)
-      if any(char in norm_path for char in ['\x00', '\n', '\r']):
-        return None
-      return norm_path
-    except (ValueError, OSError):
-      return None
-
 
 class AppendFileTool(Tool):
   name = "append_file"
@@ -296,17 +317,6 @@ class AppendFileTool(Tool):
       return ok({"path": real_path, "bytes_appended": len(content_bytes)})
     except OSError as e:
       return err("IO_ERROR", str(e))
-
-  def _secure_path(self, path: str) -> Optional[str]:
-    try:
-      expanded = os.path.expanduser(path)
-      abs_path = os.path.abspath(expanded)
-      norm_path = os.path.normpath(abs_path)
-      if any(char in norm_path for char in ['\x00', '\n', '\r']):
-        return None
-      return norm_path
-    except (ValueError, OSError):
-      return None
 
 
 class RunShellTool(Tool):
@@ -385,17 +395,6 @@ class RunShellTool(Tool):
           return err("EXEC_ERROR", f"执行失败: {str(e)}")
         time.sleep(0.1 * (attempt + 1))
     return None
-
-  def _secure_path(self, path: str) -> Optional[str]:
-    try:
-      expanded = os.path.expanduser(path)
-      abs_path = os.path.abspath(expanded)
-      norm_path = os.path.normpath(abs_path)
-      if any(char in norm_path for char in ['\x00', '\n', '\r']):
-        return None
-      return norm_path
-    except (ValueError, OSError):
-      return None
 
 
 class AskHumanTool(Tool):
@@ -505,15 +504,6 @@ class SearchFilesTool(Tool):
     except Exception as e:
       return err("SEARCH_ERROR", str(e))
 
-  def _secure_path(self, path: str) -> Optional[str]:
-    try:
-      expanded = os.path.expanduser(path)
-      abs_path = os.path.abspath(expanded)
-      norm_path = os.path.normpath(abs_path)
-      return norm_path
-    except Exception:
-      return None
-
   def _is_safe_path(self, path: str, base_path: str) -> bool:
     try:
       real_path = os.path.realpath(path)
@@ -572,6 +562,7 @@ class HttpRequestTool(Tool):
 TOOL_REGISTRY = {
   "list_directory": ListDirectoryTool,
   "read_file": ReadFileTool,
+  "backup_file": BackupFileTool,
   "write_file": WriteFileTool,
   "append_file": AppendFileTool,
   "run_shell": RunShellTool,
