@@ -1,17 +1,14 @@
 """
-原子工具集（Tool Catalog）v3 - 安全增强版
-每个工具：输入参数校验 → 权限检查 → 执行 → 返回结构化结果
-
-安全改进：
-- 修复Shell注入漏洞：使用shlex.split正确解析命令参数
-- 加强路径安全检查：防止符号链接绕过
-- 改进资源管理：确保文件句柄正确关闭
-- 完善错误处理：增加重试机制和详细错误信息
+原子工具集（Tool Catalog）v3.1 - 性能与体验优化版
+优化内容：
+- 搜索工具添加进度反馈
+- 改进错误处理，使用更具体的异常类型
+- 优化文件大小检查逻辑
 """
 
 import glob as glob_module
 import os
-import shlex  # 新增：用于安全的命令行解析
+import shlex
 import subprocess
 import time
 from typing import Any, Callable, Dict, Optional
@@ -139,6 +136,9 @@ class ReadFileTool(Tool):
     "required": ["path", "reason"],  # 强制要求理由
   }
 
+  # 文件大小限制常量
+  MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+
   def execute(self, path: str, encoding: str = "utf-8",
       max_chars: int = 50000, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
@@ -157,9 +157,8 @@ class ReadFileTool(Tool):
     try:
       size = os.path.getsize(real_path)
       # 安全检查：限制读取的文件大小
-      max_size = 100 * 1024 * 1024  # 100MB
-      if size > max_size:
-        return err("FILE_TOO_LARGE", f"文件过大（{size} bytes），超过限制（{max_size} bytes）")
+      if size > self.MAX_FILE_SIZE:
+        return err("FILE_TOO_LARGE", f"文件过大（{size} bytes），超过限制（{self.MAX_FILE_SIZE} bytes）")
 
       with open(real_path, "r", encoding=encoding, errors="replace") as f:
         content = f.read(max_chars)
@@ -210,6 +209,9 @@ class WriteFileTool(Tool):
     "required": ["path", "content"],
   }
 
+  # 内容大小限制常量
+  MAX_CONTENT_SIZE = 50 * 1024 * 1024  # 50MB
+
   def execute(self, path: str, content: str,
       encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -220,10 +222,9 @@ class WriteFileTool(Tool):
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
 
-    max_content_size = 50 * 1024 * 1024  # 50MB
     content_bytes = content.encode(encoding)
-    if len(content_bytes) > max_content_size:
-      return err("CONTENT_TOO_LARGE", f"内容过大超过 50MB 限制")
+    if len(content_bytes) > self.MAX_CONTENT_SIZE:
+      return err("CONTENT_TOO_LARGE", f"内容过大超过 {self.MAX_CONTENT_SIZE // (1024*1024)}MB 限制")
 
     try:
       dir_path = os.path.dirname(real_path) or "."
@@ -271,6 +272,9 @@ class AppendFileTool(Tool):
     "required": ["path", "content"],
   }
 
+  # 内容大小限制常量
+  MAX_APPEND_SIZE = 10 * 1024 * 1024  # 10MB
+
   def execute(self, path: str, content: str, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
     if not allowed:
@@ -280,9 +284,8 @@ class AppendFileTool(Tool):
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
 
-    max_content_size = 10 * 1024 * 1024  # 10MB
     content_bytes = content.encode('utf-8')
-    if len(content_bytes) > max_content_size:
+    if len(content_bytes) > self.MAX_APPEND_SIZE:
       return err("CONTENT_TOO_LARGE", f"追加内容过大")
 
     try:
@@ -320,6 +323,11 @@ class RunShellTool(Tool):
     "required": ["command"],
   }
 
+  # 命令限制常量
+  MAX_COMMAND_LENGTH = 10000
+  MAX_ARGS_COUNT = 100
+  MAX_TIMEOUT = 300
+
   def execute(self, command: str, timeout: int = 30,
       cwd: Optional[str] = None, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, command, "shell", reason, self._ctx(kwargs))
@@ -331,9 +339,9 @@ class RunShellTool(Tool):
     except ValueError as e:
       return err("INVALID_COMMAND", f"命令格式错误: {e}")
 
-    if len(command) > 10000:
+    if len(command) > self.MAX_COMMAND_LENGTH:
       return err("COMMAND_TOO_LONG", "命令过长")
-    if len(args) > 100:
+    if len(args) > self.MAX_ARGS_COUNT:
       return err("TOO_MANY_ARGS", f"参数过多")
 
     if cwd:
@@ -342,7 +350,7 @@ class RunShellTool(Tool):
         return err("INVALID_CWD", f"无效的工作目录: {cwd}")
       cwd = real_cwd
 
-    timeout = min(timeout, 300)
+    timeout = min(timeout, self.MAX_TIMEOUT)
     max_retries = 2
     for attempt in range(max_retries + 1):
       try:
@@ -433,6 +441,11 @@ class SearchFilesTool(Tool):
     "required": ["pattern"],
   }
 
+  # 搜索限制常量
+  MAX_MATCHES = 200
+  MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+  PROGRESS_INTERVAL = 50  # 每处理50个文件输出一次进度
+
   def execute(self, pattern: str, path: str = ".",
       search_content: bool = False, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
@@ -445,13 +458,18 @@ class SearchFilesTool(Tool):
 
     try:
       matches = []
+      file_count = 0
+
       if not search_content:
+        # 文件名搜索
         for found in glob_module.glob(os.path.join(real_path, "**", pattern), recursive=True):
           if self._is_safe_path(found, real_path):
             matches.append({"path": found, "type": "filename"})
-            if len(matches) >= 200:
+            if len(matches) >= self.MAX_MATCHES:
               break
       else:
+        # 内容搜索（带进度反馈）
+        print(f"[搜索] 正在搜索内容: {pattern}")
         for root, dirs, files in os.walk(real_path):
           dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ('bin', 'etc', 'usr')]
           for fname in files:
@@ -460,20 +478,30 @@ class SearchFilesTool(Tool):
             fpath = os.path.join(root, fname)
             if not self._is_safe_path(fpath, real_path):
               continue
+
+            file_count += 1
+            # 进度反馈
+            if file_count % self.PROGRESS_INTERVAL == 0:
+              print(f"[搜索] 已处理 {file_count} 个文件，找到 {len(matches)} 个匹配")
+
             try:
-              if os.path.getsize(fpath) > 10 * 1024 * 1024:
+              if os.path.getsize(fpath) > self.MAX_FILE_SIZE:
                 continue
               with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
                 for i, line in enumerate(f, 1):
                   if pattern.lower() in line.lower():
                     matches.append({"path": fpath, "line": i, "content": line.rstrip()[:200], "type": "content"})
-                    if len(matches) >= 200:
+                    if len(matches) >= self.MAX_MATCHES:
                       break
-            except Exception:
+            except (OSError, UnicodeDecodeError):
               continue
-          if len(matches) >= 200:
+
+          if len(matches) >= self.MAX_MATCHES:
             break
-      return ok({"matches": matches[:200], "count": len(matches), "pattern": pattern})
+
+        print(f"[搜索] 完成！共处理 {file_count} 个文件，找到 {len(matches)} 个匹配")
+
+      return ok({"matches": matches[:self.MAX_MATCHES], "count": len(matches), "pattern": pattern})
     except Exception as e:
       return err("SEARCH_ERROR", str(e))
 
@@ -511,6 +539,10 @@ class HttpRequestTool(Tool):
     "required": ["url", "method"],
   }
 
+  # 请求限制常量
+  MAX_TIMEOUT = 60
+  MAX_BODY_SIZE = 10000
+
   def execute(self, url: str, method: str = "GET", headers: dict = None,
       body: str = None, timeout: int = 15, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, url, "shell", reason, self._ctx(kwargs))
@@ -519,10 +551,18 @@ class HttpRequestTool(Tool):
 
     import urllib.request
     import urllib.error
+
+    if body and len(body) > self.MAX_BODY_SIZE:
+      return err("BODY_TOO_LARGE", f"请求体过大，限制 {self.MAX_BODY_SIZE} 字节")
+
     try:
       req = urllib.request.Request(url, method=method.upper(), headers=headers or {}, data=body.encode() if body else None)
-      with urllib.request.urlopen(req, timeout=min(timeout, 60)) as resp:
+      with urllib.request.urlopen(req, timeout=min(timeout, self.MAX_TIMEOUT)) as resp:
         return ok({"status_code": resp.status, "body": resp.read().decode("utf-8", errors="replace")[:10000]})
+    except urllib.error.HTTPError as e:
+      return err("HTTP_ERROR", f"HTTP错误: {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+      return err("URL_ERROR", f"URL错误: {e.reason}")
     except Exception as e:
       return err("HTTP_ERROR", str(e))
 

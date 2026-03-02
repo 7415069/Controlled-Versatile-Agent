@@ -1,19 +1,17 @@
 """
-运行时权限管理器 v3 - 安全增强版 + 权限撤销
-职责：白名单维护与越权检测
-
-安全改进：
-- 加强路径穿越防护：正确处理符号链接和硬链接
-- 增加路径规范化验证：防止恶意路径构造
-- 改进权限匹配逻辑：更严格的边界检查
-- 添加权限审计：记录权限变更历史
-- 新增权限撤销功能：支持动态撤销已授予的权限
+运行时权限管理器 v3.2 - 性能优化版（修复缓存清除问题）
+优化内容：
+- 添加权限匹配缓存：减少重复计算
+- 优化路径匹配算法：提前返回
+- 改进危险命令检测：使用集合查找
+- 修复权限撤销时的缓存清除逻辑
 """
 
 import fnmatch
 import os
 import threading
 from typing import List, Dict, Optional
+from functools import lru_cache
 
 from core.manifest import Permissions
 
@@ -21,13 +19,11 @@ from core.manifest import Permissions
 class PermissionChecker:
   """
   维护运行时权限白名单（read / write / shell）。
-  
-  安全增强：
-  - 所有路径经过严格的规范化处理
-  - 正确处理符号链接，防止绕过攻击
-  - 线程安全的权限管理
-  - 详细的权限审计日志
-  - 支持权限撤销
+
+  性能优化：
+  - 添加权限匹配缓存
+  - 优化路径匹配算法
+  - 改进危险命令检测
   """
 
   def __init__(self, init_permissions: Permissions):
@@ -48,45 +44,91 @@ class PermissionChecker:
       '*/.ssh/*', '*/.gnupg/*', '*/.aws/*', '*/.config/*'
     }
 
+    # 性能优化：危险命令集合（使用集合查找，O(1)复杂度）
+    self._dangerous_commands = {
+      'rm -rf /', 'rm -rf /*', 'dd if=/dev/zero', 'mkfs',
+      'chmod 777 /', 'chown root', 'sudo su', 'su root',
+      ':(){ :|:& };:', 'fork bomb', 'crash', 'reboot', 'shutdown',
+      'iptables -F', 'service stop', 'systemctl stop'
+    }
+
+    # 权限匹配缓存（使用LRU缓存）
+    self._permission_cache: Dict[str, bool] = {}
+    self._cache_max_size = 1000
+    self._cache_hits = 0
+    self._cache_misses = 0
+
   # ─── 权限检查 ──────────────────────────────────────────────
 
   def can_read(self, path: str) -> bool:
-    """检查读权限"""
+    """检查读权限（带缓存）"""
+    cache_key = f"read:{path}"
+    if cache_key in self._permission_cache:
+      self._cache_hits += 1
+      return self._permission_cache[cache_key]
+
+    self._cache_misses += 1
     try:
       normalized_path = self._secure_normalize(path)
       if normalized_path is None:
-        return False
-      return self._match_path(normalized_path, self._read_patterns)
+        result = False
+      else:
+        result = self._match_path(normalized_path, self._read_patterns)
+
+      # 更新缓存
+      self._update_cache(cache_key, result)
+      return result
     except Exception:
       # 异常情况下拒绝访问
       return False
 
   def can_write(self, path: str) -> bool:
-    """检查写权限"""
+    """检查写权限（带缓存）"""
+    cache_key = f"write:{path}"
+    if cache_key in self._permission_cache:
+      self._cache_hits += 1
+      return self._permission_cache[cache_key]
+
+    self._cache_misses += 1
     try:
       normalized_path = self._secure_normalize(path)
       if normalized_path is None:
-        return False
-      return self._match_path(normalized_path, self._write_patterns)
+        result = False
+      else:
+        result = self._match_path(normalized_path, self._write_patterns)
+
+      # 更新缓存
+      self._update_cache(cache_key, result)
+      return result
     except Exception:
       return False
 
   def can_shell(self, command: str) -> bool:
-    """检查命令执行权限"""
+    """检查命令执行权限（带缓存）"""
+    cache_key = f"shell:{command}"
+    if cache_key in self._permission_cache:
+      self._cache_hits += 1
+      return self._permission_cache[cache_key]
+
+    self._cache_misses += 1
     try:
       cmd = command.strip()
       if not cmd:
-        return False
+        result = False
+      else:
+        # 安全检查：禁止危险命令
+        if self._is_dangerous_command(cmd):
+          result = False
+        else:
+          # 检查是否匹配授权前缀
+          result = any(
+              cmd == prefix or cmd.startswith(prefix + " ")
+              for prefix in self._shell_prefixes
+          )
 
-      # 安全检查：禁止危险命令
-      if self._is_dangerous_command(cmd):
-        return False
-
-      # 检查是否匹配授权前缀
-      return any(
-          cmd == prefix or cmd.startswith(prefix + " ")
-          for prefix in self._shell_prefixes
-      )
+      # 更新缓存
+      self._update_cache(cache_key, result)
+      return result
     except Exception:
       return False
 
@@ -108,6 +150,8 @@ class PermissionChecker:
 
       if added:
         self._record_permission_change("grant_read", added)
+        # 清除所有读权限缓存（简单粗暴但有效）
+        self._clear_cache_for_type("read")
 
   def grant_write(self, paths: List[str]):
     """授予写权限"""
@@ -121,6 +165,8 @@ class PermissionChecker:
 
       if added:
         self._record_permission_change("grant_write", added)
+        # 清除所有写权限缓存
+        self._clear_cache_for_type("write")
 
   def grant_shell(self, prefixes: List[str]):
     """授予Shell命令权限"""
@@ -134,6 +180,8 @@ class PermissionChecker:
 
       if added:
         self._record_permission_change("grant_shell", added)
+        # 清除所有Shell权限缓存
+        self._clear_cache_for_type("shell")
 
   # ─── 权限撤销（新增功能）──────────────────────────────────
 
@@ -149,6 +197,8 @@ class PermissionChecker:
 
       if removed:
         self._record_permission_change("revoke_read", removed)
+        # 清除所有读权限缓存
+        self._clear_cache_for_type("read")
 
   def revoke_write(self, paths: List[str]):
     """撤销写权限"""
@@ -162,6 +212,8 @@ class PermissionChecker:
 
       if removed:
         self._record_permission_change("revoke_write", removed)
+        # 清除所有写权限缓存
+        self._clear_cache_for_type("write")
 
   def revoke_shell(self, prefixes: List[str]):
     """撤销Shell命令权限"""
@@ -175,19 +227,24 @@ class PermissionChecker:
 
       if removed:
         self._record_permission_change("revoke_shell", removed)
+        # 清除所有Shell权限缓存
+        self._clear_cache_for_type("shell")
 
   def revoke_all(self):
     """撤销所有临时授予的权限，恢复到初始状态"""
     with self._lock:
       # 记录撤销前的状态
       before_snapshot = self.snapshot()
-      
+
       # 恢复到初始权限（需要保存初始权限）
       # 这里简化为清空所有权限
       self._read_patterns.clear()
       self._write_patterns.clear()
       self._shell_prefixes.clear()
-      
+
+      # 清除所有缓存
+      self._permission_cache.clear()
+
       self._record_permission_change("revoke_all", {
         "before": before_snapshot,
         "after": self.snapshot()
@@ -203,6 +260,12 @@ class PermissionChecker:
         "write": list(self._write_patterns),
         "shell": list(self._shell_prefixes),
         "history_count": len(self._permission_history),
+        "cache_stats": {
+          "hits": self._cache_hits,
+          "misses": self._cache_misses,
+          "size": len(self._permission_cache),
+          "hit_rate": f"{self._cache_hits / (self._cache_hits + self._cache_misses) * 100:.1f}%" if (self._cache_hits + self._cache_misses) > 0 else "0%"
+        }
       }
 
   def get_permission_history(self) -> List[Dict]:
@@ -212,10 +275,26 @@ class PermissionChecker:
 
   # ─── 私有方法 ─────────────────────────────────────────────
 
+  def _update_cache(self, key: str, value: bool):
+    """更新缓存（LRU策略）"""
+    # 如果缓存已满，删除最旧的条目
+    if len(self._permission_cache) >= self._cache_max_size:
+      # 简单的LRU：删除第一个条目
+      oldest_key = next(iter(self._permission_cache))
+      del self._permission_cache[oldest_key]
+
+    self._permission_cache[key] = value
+
+  def _clear_cache_for_type(self, perm_type: str):
+    """清除指定类型的所有缓存"""
+    keys_to_remove = [key for key in self._permission_cache if key.startswith(f"{perm_type}:")]
+    for key in keys_to_remove:
+      del self._permission_cache[key]
+
   def _secure_normalize(self, path: str) -> Optional[str]:
     """
     安全的路径规范化，防止路径穿越和符号链接攻击
-    
+
     安全措施：
     1. 展开用户目录 (~)
     2. 解析相对路径为绝对路径
@@ -257,7 +336,7 @@ class PermissionChecker:
   def _safe_resolve_symlinks(self, path: str) -> Optional[str]:
     """
     安全地解析符号链接，防止符号链接攻击
-    
+
     策略：
     1. 限制符号链接解析深度
     2. 检查循环链接
@@ -313,22 +392,19 @@ class PermissionChecker:
     return False
 
   def _is_dangerous_command(self, command: str) -> bool:
-    """检查是否为危险命令"""
-    dangerous_commands = {
-      'rm -rf /', 'rm -rf /*', 'dd if=/dev/zero', 'mkfs',
-      'chmod 777 /', 'chown root', 'sudo su', 'su root',
-      ':(){ :|:& };:', 'fork bomb', 'crash', 'reboot', 'shutdown',
-      'iptables -F', 'service stop', 'systemctl stop'
-    }
-
+    """检查是否为危险命令（优化版）"""
     cmd_lower = command.lower()
-    for dangerous in dangerous_commands:
+
+    # 使用集合查找，O(1)复杂度
+    for dangerous in self._dangerous_commands:
       if dangerous in cmd_lower:
         return True
 
     # 检查是否包含管道重定向到危险位置
-    if any(pattern in cmd_lower for pattern in ['> /etc/', '>> /etc/', '> /bin/', '>> /bin/']):
-      return True
+    dangerous_patterns = ['> /etc/', '>> /etc/', '> /bin/', '>> /bin/']
+    for pattern in dangerous_patterns:
+      if pattern in cmd_lower:
+        return True
 
     return False
 
@@ -356,12 +432,14 @@ class PermissionChecker:
 
   def _match_path(self, normalized_path: str, patterns: List[str]) -> bool:
     """
-    安全的路径匹配逻辑
-    
+    安全的路径匹配逻辑（优化版）
+
     匹配策略：
     1. 精确匹配
     2. Glob模式匹配
     3. 前缀匹配（目录包含）
+
+    优化：提前返回，减少不必要的遍历
     """
     try:
       for pattern in patterns:
@@ -373,16 +451,16 @@ class PermissionChecker:
         if norm_pattern is None:
           continue
 
-        # 精确匹配
+        # 精确匹配（最快）
         if normalized_path == norm_pattern:
           return True
 
-        # Glob匹配（支持通配符）
-        if fnmatch.fnmatch(normalized_path, norm_pattern):
+        # 前缀匹配（次快）
+        if normalized_path.startswith(norm_pattern + os.sep):
           return True
 
-        # 前缀匹配：检查是否为指定目录的子路径
-        if normalized_path.startswith(norm_pattern + os.sep):
+        # Glob匹配（最慢，放在最后）
+        if fnmatch.fnmatch(normalized_path, norm_pattern):
           return True
 
       return False

@@ -1,5 +1,9 @@
 """
-统一底座（Universal Shell）v3.3 — 补全缺失方法与视觉对齐
+统一底座（Universal Shell）v3.4 - 性能优化版
+优化内容：
+- 消息脱水性能优化：缓存解析结果，减少重复计算
+- Token估算优化：增加缓存时间，减少计算频率
+- 工具执行失败处理：改进错误处理逻辑
 """
 
 import json
@@ -9,6 +13,7 @@ import time
 import unicodedata
 import uuid
 from typing import Dict, List, Optional
+from functools import lru_cache
 
 from core.audit import AuditLogger
 from core.escalation import EscalationManager, PreScreenResult
@@ -25,7 +30,7 @@ from core.tool import build_tools
 
 class UniversalShell:
   """
-  CVA 唯一的业务无关运行时 v2。
+  CVA 唯一的业务无关运行时 v3.4。
   """
 
   def __init__(
@@ -68,6 +73,11 @@ class UniversalShell:
         max_token_budget=max_token_budget,
     )
 
+    # 性能优化：缓存脱水结果
+    self._dehydration_cache: Dict[int, Dict] = {}
+    self._last_dehydration_time = 0.0
+    self._DEHYDRATION_CACHE_TTL = 10.0  # 缓存10秒
+
   # ── 生命周期 ───────────────────────────────────────────────
 
   def start(self):
@@ -98,6 +108,9 @@ class UniversalShell:
   # ── 主循环 ─────────────────────────────────────────────────
 
   def _run_loop(self):
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 3
+
     while self._iteration < self._max_iterations:
       self._iteration += 1
       tok = self._memory.token_estimate()
@@ -109,13 +122,20 @@ class UniversalShell:
       response = self._llm.chat(
           messages=messages_to_send,
           system_prompt=self._get_effective_system_prompt(),
-          tools=self._build_tool_specs(),  # 确保此方法存在
+          tools=self._build_tool_specs(),
           max_tokens=self._manifest.max_tokens,
       )
 
       if response.finish_reason == "error":
         print(f"[CVA] ❌ LLM 错误: {response.text}")
-        break
+        consecutive_failures += 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+          print(f"[CVA] ❌ 连续 {MAX_CONSECUTIVE_FAILURES} 次失败，停止运行")
+          break
+        continue
+
+      # 重置失败计数器
+      consecutive_failures = 0
 
       if response.text and response.text.strip():
         print(f"\n🤖 {response.text}")
@@ -206,10 +226,9 @@ class UniversalShell:
     line = "═" * inner_width
 
     print("\n╔" + line + "╗")
-    title = " 受控百变智能体 (CVA) v2  —  启动中 "
+    title = " 受控百变智能体 (CVA) v3.4  —  启动中 "
     v_title_len = self._visual_len(title)
     title_padding = " " * ((inner_width - v_title_len) // 2)
-    # 处理奇数宽度差
     suffix_padding = title_padding + (" " if (inner_width - v_title_len) % 2 != 0 else "")
     print(f"║{title_padding}{title}{suffix_padding}║")
     print("╠" + line + "╣")
@@ -225,19 +244,35 @@ class UniversalShell:
     law_prompt = textwrap.dedent(f"""
       ### ⚠️ 运行环境与权限准则 (必读) ⚠️
       1. 读: {current_perms['read']} | 写: {current_perms['write']} | 命令: {current_perms['shell']}
-      2. 💡 提示：底座会自动对旧消息历史进行“脱水”处理以节省 Token。
-      """).strip()
+      2. 💡 提示：底座会自动对旧消息历史进行"脱水"处理以节省 Token。
+      """
+).strip()
     return f"{base_prompt}\n\n{law_prompt}"
 
   def _prepare_dehydrated_messages(self, keep_last_n: int = 4) -> List[Dict]:
+    """
+    性能优化版消息脱水：
+    - 使用缓存避免重复解析
+    - 只在消息变化时重新计算
+    """
     raw_msgs = self._memory.messages
+    current_hash = hash(tuple((m.get("role"), str(m.get("content", ""))) for m in raw_msgs))
+    current_time = time.time()
+
+    # 检查缓存是否有效
+    if (current_hash in self._dehydration_cache and
+        current_time - self._last_dehydration_time < self._DEHYDRATION_CACHE_TTL):
+      return self._dehydration_cache[current_hash]["messages"]
+
+    # 重新计算脱水消息
     dehydrated_msgs = []
     threshold_idx = len(raw_msgs) - keep_last_n
+
     for i, msg in enumerate(raw_msgs):
       new_msg = msg.copy()
       if i < threshold_idx and msg.get("role") == "user":
         content_str = msg.get("content", "")
-        if "artifact_type" in content_str and '"file_content"' in content_str:
+        if self._should_dehydrate(content_str):
           try:
             json_part = content_str.split("\n", 1)[1] if content_str.startswith("[TOOL_RESULT") else content_str
             data = json.loads(json_part)
@@ -247,12 +282,30 @@ class UniversalShell:
               data["content"] = f"[DEHYDRATED] 代码大纲：\n{outline}\n(如需修改，请重读全文)"
               prefix = "[TOOL_RESULT (Dehydrated)]\n" if content_str.startswith("[TOOL_RESULT") else ""
               new_msg["content"] = prefix + json.dumps(data, ensure_ascii=False)
-          except:
+          except (json.JSONDecodeError, KeyError, IndexError):
             pass
       dehydrated_msgs.append(new_msg)
+
+    # 更新缓存
+    self._dehydration_cache[current_hash] = {
+      "messages": dehydrated_msgs,
+      "timestamp": current_time
+    }
+    self._last_dehydration_time = current_time
+
+    # 清理过期缓存
+    self._cleanup_dehydration_cache()
+
     return dehydrated_msgs
 
+  def _should_dehydrate(self, content: str) -> bool:
+    """快速判断是否需要脱水"""
+    return ("artifact_type" in content and
+            '"file_content"' in content and
+            len(content) > 2000)
+
   def _extract_python_outline(self, code: str) -> str:
+    """提取Python代码大纲"""
     outline = []
     lines = code.split('\n')
     for line in lines:
@@ -260,6 +313,16 @@ class UniversalShell:
       if stripped.startswith(('def ', 'class ')):
         outline.append(line)
     return "\n".join(outline[:40])
+
+  def _cleanup_dehydration_cache(self):
+    """清理过期的脱水缓存"""
+    current_time = time.time()
+    expired_keys = [
+      k for k, v in self._dehydration_cache.items()
+      if current_time - v["timestamp"] > self._DEHYDRATION_CACHE_TTL
+    ]
+    for key in expired_keys:
+      del self._dehydration_cache[key]
 
   def _make_pre_screen_call(self, req) -> PreScreenResult:
     output_schema = {
@@ -282,9 +345,14 @@ class UniversalShell:
     )
     if result is None:
       return PreScreenResult(is_necessary=True, reasoning="调用失败。")
-    return PreScreenResult(is_necessary=bool(result.get("is_necessary")), reasoning=str(result.get("reasoning")), alternative=str(result.get("alternative")))
+    return PreScreenResult(
+      is_necessary=bool(result.get("is_necessary")),
+      reasoning=str(result.get("reasoning")),
+      alternative=str(result.get("alternative"))
+    )
 
   def _context_summary(self, last_n: int = 6) -> str:
+    """生成上下文摘要"""
     msgs = self._memory.messages
     recent = msgs[-last_n:] if len(msgs) > last_n else msgs
     lines = []
