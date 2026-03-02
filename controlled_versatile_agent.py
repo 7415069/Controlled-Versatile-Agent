@@ -19,6 +19,7 @@
 
 import argparse
 import sys
+import textwrap
 
 from core.manifest import load_manifest
 from core.memory import MemoryStore
@@ -29,15 +30,15 @@ def main():
   parser = argparse.ArgumentParser(
       description="受控百变智能体 (CVA) v2 — Controlled Versatile Agent",
       formatter_class=argparse.RawDescriptionHelpFormatter,
-      epilog="""
-模型示例（--model 参数，litellm 格式）:
-  claude-opus-4-5              Anthropic Claude（默认）
-  gpt-4o                       OpenAI GPT-4o
-  gemini/gemini-2.0-flash      Google Gemini
-  ollama/qwen2.5:14b           本地 Ollama
-  deepseek/deepseek-chat        DeepSeek
-  groq/llama3-70b-8192          Groq
-        """
+      epilog=textwrap.dedent("""
+        模型示例（--model 参数，litellm 格式）:
+          claude-opus-4-5              Anthropic Claude（默认）
+          gpt-4o                       OpenAI GPT-4o
+          gemini/gemini-2.0-flash      Google Gemini
+          ollama/qwen2.5:14b           本地 Ollama
+          deepseek/deepseek-chat        DeepSeek
+          groq/llama3-70b-8192          Groq
+        """).strip()
   )
   parser.add_argument("--manifest", required=True, help="Role Manifest YAML 文件路径")
   parser.add_argument("--model", default="claude-opus-4-5", help="LiteLLM 格式模型名（默认: claude-opus-4-5）")

@@ -18,7 +18,7 @@ from core.llm_adapter import (
 from core.manifest import load_manifest, RoleManifest
 from core.memory import MemoryStore
 from core.permissions import PermissionChecker
-from core.catalog import build_tools
+from core.tool import build_tools
 
 
 class UniversalShell:
