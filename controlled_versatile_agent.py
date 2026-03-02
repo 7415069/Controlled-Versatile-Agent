@@ -21,6 +21,10 @@ import argparse
 import sys
 import textwrap
 
+from dotenv import load_dotenv  # 新增
+
+load_dotenv()  # 新增，自动读取 .env 文件
+
 from core.manifest import load_manifest
 from core.memory import MemoryStore
 from core.shell import UniversalShell
