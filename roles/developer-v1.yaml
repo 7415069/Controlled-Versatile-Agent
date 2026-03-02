@@ -49,5 +49,6 @@ escalation_policy:
     - "/etc/**"
     - "~/.ssh/**"
     - "**/secrets/**"
+    - "**/.env"
   notify_channel: console
   timeout_seconds: 300
