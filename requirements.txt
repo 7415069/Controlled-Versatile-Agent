@@ -1,0 +1,6 @@
+# LLM 统一接入层（替代 anthropic SDK，支持 100+ 模型）
+litellm>=1.40.0
+
+# 其他依赖
+PyYAML>=6.0
+jsonschema>=4.0
