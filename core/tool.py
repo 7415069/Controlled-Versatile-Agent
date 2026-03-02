@@ -21,7 +21,7 @@ def err(code: str, message: str) -> Dict:
 
 # ─── 工具基类 ────────────────────────────────────────────────
 
-class BaseTool:
+class Tool:
   name: str = ""
   description: str = ""
   input_schema: Dict = {}
@@ -36,6 +36,10 @@ class BaseTool:
   def execute(self, **kwargs) -> Dict:
     raise NotImplementedError
 
+  def _ctx(self, kwargs: dict) -> str:
+    """从 execute kwargs 中提取对话上下文摘要（由 shell._dispatch_tool 注入）"""
+    return kwargs.get("_context_summary", "")
+
   def to_api_spec(self) -> Dict:
     return {
       "name": self.name,
@@ -46,7 +50,7 @@ class BaseTool:
 
 # ─── 具体工具实现 ─────────────────────────────────────────────
 
-class ListDirectoryTool(BaseTool):
+class ListDirectoryTool(Tool):
   name = "list_directory"
   description = "列出指定目录下的文件和子目录。返回名称、类型（file/dir）及大小信息。"
   input_schema = {
@@ -58,8 +62,8 @@ class ListDirectoryTool(BaseTool):
     "required": ["path"],
   }
 
-  def execute(self, path: str, reason: str = "", **_) -> Dict:
-    allowed, msg = self._check(self.name, path, "list", reason)
+  def execute(self, path: str, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "list", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -85,7 +89,7 @@ class ListDirectoryTool(BaseTool):
       return err("OS_PERMISSION_DENIED", str(e))
 
 
-class ReadFileTool(BaseTool):
+class ReadFileTool(Tool):
   name = "read_file"
   description = "读取文件。如果你认为该文件不在你的初始白名单内，请在 reason 参数中详细说明你读取该文件的必要性，以说服导师为你提权。"
   input_schema = {
@@ -98,8 +102,8 @@ class ReadFileTool(BaseTool):
   }
 
   def execute(self, path: str, encoding: str = "utf-8",
-      max_chars: int = 50000, reason: str = "", **_) -> Dict:
-    allowed, msg = self._check(self.name, path, "read", reason)
+      max_chars: int = 50000, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -127,7 +131,7 @@ class ReadFileTool(BaseTool):
       return err("IO_ERROR", str(e))
 
 
-class WriteFileTool(BaseTool):
+class WriteFileTool(Tool):
   name = "write_file"
   description = "将内容写入文件（覆盖写）。目标目录不存在时自动创建。"
   input_schema = {
@@ -142,8 +146,8 @@ class WriteFileTool(BaseTool):
   }
 
   def execute(self, path: str, content: str,
-      encoding: str = "utf-8", reason: str = "", **_) -> Dict:
-    allowed, msg = self._check(self.name, path, "write", reason)
+      encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -157,7 +161,7 @@ class WriteFileTool(BaseTool):
       return err("IO_ERROR", str(e))
 
 
-class AppendFileTool(BaseTool):
+class AppendFileTool(Tool):
   name = "append_file"
   description = "将内容追加写入文件末尾。文件不存在时自动创建。"
   input_schema = {
@@ -170,8 +174,8 @@ class AppendFileTool(BaseTool):
     "required": ["path", "content"],
   }
 
-  def execute(self, path: str, content: str, reason: str = "", **_) -> Dict:
-    allowed, msg = self._check(self.name, path, "write", reason)
+  def execute(self, path: str, content: str, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -185,7 +189,7 @@ class AppendFileTool(BaseTool):
       return err("IO_ERROR", str(e))
 
 
-class RunShellTool(BaseTool):
+class RunShellTool(Tool):
   name = "run_shell"
   description = "在系统 Shell 中执行命令，返回 stdout、stderr 和退出码。"
   input_schema = {
@@ -200,8 +204,8 @@ class RunShellTool(BaseTool):
   }
 
   def execute(self, command: str, timeout: int = 30,
-      cwd: Optional[str] = None, reason: str = "", **_) -> Dict:
-    allowed, msg = self._check(self.name, command, "shell", reason)
+      cwd: Optional[str] = None, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, command, "shell", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -230,7 +234,7 @@ class RunShellTool(BaseTool):
       return err("EXEC_ERROR", str(e))
 
 
-class AskHumanTool(BaseTool):
+class AskHumanTool(Tool):
   name = "ask_human"
   description = "向人类导师提问，挂起当前任务等待文字回复。用于需要人类判断的关键决策点。"
   input_schema = {
@@ -258,7 +262,7 @@ class AskHumanTool(BaseTool):
       return err("NO_INPUT", "未获得人类输入（非交互模式）")
 
 
-class SearchFilesTool(BaseTool):
+class SearchFilesTool(Tool):
   name = "search_files"
   description = "在指定目录内搜索匹配模式的文件名或文件内容。"
   input_schema = {
@@ -273,8 +277,8 @@ class SearchFilesTool(BaseTool):
   }
 
   def execute(self, pattern: str, path: str = ".",
-      search_content: bool = False, reason: str = "", **_) -> Dict:
-    allowed, msg = self._check(self.name, path, "read", reason)
+      search_content: bool = False, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -319,7 +323,7 @@ class SearchFilesTool(BaseTool):
       return err("SEARCH_ERROR", str(e))
 
 
-class HttpRequestTool(BaseTool):
+class HttpRequestTool(Tool):
   name = "http_request"
   description = "发起 HTTP 请求。目标域名须在权限白名单中注册（shell 权限条目以 http:// 或 https:// 开头）。"
   input_schema = {
@@ -336,9 +340,9 @@ class HttpRequestTool(BaseTool):
   }
 
   def execute(self, url: str, method: str = "GET", headers: dict = None,
-      body: str = None, timeout: int = 15, reason: str = "", **_) -> Dict:
+      body: str = None, timeout: int = 15, reason: str = "", **kwargs) -> Dict:
     # 用 shell 权限类型检查 URL（以域名/URL 前缀作为权限条目）
-    allowed, msg = self._check(self.name, url, "shell", reason)
+    allowed, msg = self._check(self.name, url, "shell", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
@@ -379,7 +383,7 @@ TOOL_REGISTRY = {
 }
 
 
-def build_tools(capabilities: list, check_fn: Callable) -> Dict[str, BaseTool]:
+def build_tools(capabilities: list, check_fn: Callable) -> Dict[str, Tool]:
   """根据 Manifest capabilities 构建工具实例字典"""
   tools = {}
   for cap in capabilities:
