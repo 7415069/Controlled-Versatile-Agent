@@ -155,8 +155,10 @@ class UniversalShell:
 
       if response.finish_reason == "stop":
         print("\n[CVA] ✅ 任务完成")
-        try: cont = input("\n[CVA] 继续对话？（直接回车退出）: ").strip()
-        except EOFError: cont = ""
+        try:
+          cont = input("\n[CVA] 继续对话？（直接回车退出）: ").strip()
+        except EOFError:
+          cont = ""
         if cont:
           self._memory.append({"role": "user", "content": cont})
           self._logger.log("HUMAN_INPUT", {"content_hash": _hash(cont)})
@@ -265,7 +267,8 @@ class UniversalShell:
               # 重新组装内容
               prefix = "[TOOL_RESULT (Dehydrated)]\n" if content_str.startswith("[TOOL_RESULT") else ""
               new_msg["content"] = prefix + json.dumps(data, ensure_ascii=False)
-          except: pass
+          except:
+            pass
       dehydrated_msgs.append(new_msg)
     return dehydrated_msgs
 
@@ -278,7 +281,7 @@ class UniversalShell:
       if stripped.startswith(('def ', 'class ')):
         # 保留原始行（包含其缩进）
         outline.append(line)
-    return "\n".join(outline[:40]) # 最多保留 40 行大纲
+    return "\n".join(outline[:40])  # 最多保留 40 行大纲
 
   # ── 其它逻辑 ──
 
@@ -301,7 +304,8 @@ class UniversalShell:
         function_description="提交判断结果",
         max_tokens=512,
     )
-    if result is None: return PreScreenResult(is_necessary=True, reasoning="调用失败，保守放行。")
+    if result is None:
+      return PreScreenResult(is_necessary=True, reasoning="调用失败，保守放行。")
     return PreScreenResult(is_necessary=bool(result.get("is_necessary")), reasoning=str(result.get("reasoning")), alternative=str(result.get("alternative")))
 
   def _context_summary(self, last_n: int = 6) -> str:
@@ -310,9 +314,11 @@ class UniversalShell:
     lines = []
     for m in recent:
       role = m.get("role", "")
-      if role not in ("user", "assistant"): continue
+      if role not in ("user", "assistant"):
+        continue
       text = str(m.get("content", ""))
-      if text: lines.append(f"[{'用户' if role == 'user' else '助手'}] {text[:150]}")
+      if text:
+        lines.append(f"[{'用户' if role == 'user' else '助手'}] {text[:150]}")
     return "\n".join(lines)
 
 
