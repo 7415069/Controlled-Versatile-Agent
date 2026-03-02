@@ -193,7 +193,7 @@ class UniversalShell:
 
   # ── 辅助方法 ──
 
-  def safe_input(self, prompt: str) -> str:
+  def _safe_input(self, prompt: str) -> str:
     sys.stdout.write(prompt)
     sys.stdout.flush()
     line = sys.stdin.buffer.readline()

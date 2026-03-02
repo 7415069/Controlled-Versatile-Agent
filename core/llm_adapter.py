@@ -3,15 +3,19 @@ LiteLLM 适配层（LLM Adapter）v3.2 - 错误处理增强版 + 公开统计接
 """
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, TypeVar
+from typing import Dict, List, Optional, TypeVar, Union
 
 import litellm
 from litellm import completion
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+from litellm.types.utils import ModelResponse
 
+logger = logging.getLogger(__name__)
 litellm.set_verbose = False
 T = TypeVar("T")
 
@@ -87,13 +91,17 @@ class LLMAdapter:
     with self._lock:
       # 返回副本，防止外部修改
       return CallStats(
-        total_calls=self._stats.total_calls,
-        successful_calls=self._stats.successful_calls,
-        failed_calls=self._stats.failed_calls,
-        total_tokens=self._stats.total_tokens,
-        total_response_time=self._stats.total_response_time,
-        error_counts=dict(self._stats.error_counts),
+          total_calls=self._stats.total_calls,
+          successful_calls=self._stats.successful_calls,
+          failed_calls=self._stats.failed_calls,
+          total_tokens=self._stats.total_tokens,
+          total_response_time=self._stats.total_response_time,
+          error_counts=dict(self._stats.error_counts),
       )
+
+  def _completion(self, **kwargs) -> Union[ModelResponse, CustomStreamWrapper]:
+    logger.info(f"LLM 调用参数: {kwargs}")
+    return completion(**kwargs)
 
   def chat(self, messages: List[Dict], system_prompt: str, tools: Optional[List[Dict]] = None,
       max_tokens: int = 8192, temperature: float = 0.0) -> LLMResponse:
@@ -139,14 +147,14 @@ class LLMAdapter:
     if tools:
       kwargs["tools"] = _convert_tools_to_litellm(tools)
       kwargs["tool_choice"] = "auto"
-    return self._parse_response(completion(**kwargs))
+    return self._parse_response(self._completion(**kwargs))
 
   def _do_structured_call(self, messages, system_prompt, output_schema, function_name, function_description, max_tokens, temperature):
     forced_tool = [{"type": "function", "function": {"name": function_name, "description": function_description, "parameters": output_schema}}]
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     kwargs = {"model": self._model, "messages": full_messages, "max_tokens": min(max_tokens, self._max_output_tokens), "temperature": temperature, "timeout": self._timeout, "tools": forced_tool,
               "tool_choice": {"type": "function", "function": {"name": function_name}}, **self._extra_kwargs}
-    return self._parse_structured_response(completion(**kwargs))
+    return self._parse_structured_response(self._completion(**kwargs))
 
   def _validate_chat_request(self, messages, system_prompt, tools, max_tokens):
     if not messages:
