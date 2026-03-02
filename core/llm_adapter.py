@@ -1,5 +1,5 @@
 """
-LiteLLM 适配层（LLM Adapter）v3.1 - 错误处理增强版
+LiteLLM 适配层（LLM Adapter）v3.2 - 错误处理增强版 + 公开统计接口
 """
 
 import json
@@ -80,6 +80,20 @@ class LLMAdapter:
   @property
   def model(self) -> str:
     return self._model
+
+  @property
+  def stats(self) -> CallStats:
+    """公开统计信息接口"""
+    with self._lock:
+      # 返回副本，防止外部修改
+      return CallStats(
+        total_calls=self._stats.total_calls,
+        successful_calls=self._stats.successful_calls,
+        failed_calls=self._stats.failed_calls,
+        total_tokens=self._stats.total_tokens,
+        total_response_time=self._stats.total_response_time,
+        error_counts=dict(self._stats.error_counts),
+      )
 
   def chat(self, messages: List[Dict], system_prompt: str, tools: Optional[List[Dict]] = None,
       max_tokens: int = 8192, temperature: float = 0.0) -> LLMResponse:
@@ -184,8 +198,14 @@ class LLMAdapter:
       self._stats.total_calls += 1
       if resp and not err:
         self._stats.successful_calls += 1
+        # 更新 token 统计
+        if resp.usage:
+          self._stats.total_tokens += resp.usage.get("total_tokens", 0)
+        self._stats.total_response_time += rtime
       else:
         self._stats.failed_calls += 1
+        if err:
+          self._stats.error_counts[err.error_type] = self._stats.error_counts.get(err.error_type, 0) + 1
 
 
 def _convert_tools_to_litellm(tools):

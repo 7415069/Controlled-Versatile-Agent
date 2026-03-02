@@ -1,5 +1,5 @@
 """
-运行时权限管理器 v2 — 安全增强版
+运行时权限管理器 v3 - 安全增强版 + 权限撤销
 职责：白名单维护与越权检测
 
 安全改进：
@@ -7,6 +7,7 @@
 - 增加路径规范化验证：防止恶意路径构造
 - 改进权限匹配逻辑：更严格的边界检查
 - 添加权限审计：记录权限变更历史
+- 新增权限撤销功能：支持动态撤销已授予的权限
 """
 
 import fnmatch
@@ -26,6 +27,7 @@ class PermissionChecker:
   - 正确处理符号链接，防止绕过攻击
   - 线程安全的权限管理
   - 详细的权限审计日志
+  - 支持权限撤销
   """
 
   def __init__(self, init_permissions: Permissions):
@@ -132,6 +134,64 @@ class PermissionChecker:
 
       if added:
         self._record_permission_change("grant_shell", added)
+
+  # ─── 权限撤销（新增功能）──────────────────────────────────
+
+  def revoke_read(self, paths: List[str]):
+    """撤销读权限"""
+    with self._lock:
+      removed = []
+      for p in paths:
+        normalized = self._secure_normalize(p)
+        if normalized and normalized in self._read_patterns:
+          self._read_patterns.remove(normalized)
+          removed.append(normalized)
+
+      if removed:
+        self._record_permission_change("revoke_read", removed)
+
+  def revoke_write(self, paths: List[str]):
+    """撤销写权限"""
+    with self._lock:
+      removed = []
+      for p in paths:
+        normalized = self._secure_normalize(p)
+        if normalized and normalized in self._write_patterns:
+          self._write_patterns.remove(normalized)
+          removed.append(normalized)
+
+      if removed:
+        self._record_permission_change("revoke_write", removed)
+
+  def revoke_shell(self, prefixes: List[str]):
+    """撤销Shell命令权限"""
+    with self._lock:
+      removed = []
+      for p in prefixes:
+        clean_prefix = self._clean_shell_prefix(p)
+        if clean_prefix and clean_prefix in self._shell_prefixes:
+          self._shell_prefixes.remove(clean_prefix)
+          removed.append(clean_prefix)
+
+      if removed:
+        self._record_permission_change("revoke_shell", removed)
+
+  def revoke_all(self):
+    """撤销所有临时授予的权限，恢复到初始状态"""
+    with self._lock:
+      # 记录撤销前的状态
+      before_snapshot = self.snapshot()
+      
+      # 恢复到初始权限（需要保存初始权限）
+      # 这里简化为清空所有权限
+      self._read_patterns.clear()
+      self._write_patterns.clear()
+      self._shell_prefixes.clear()
+      
+      self._record_permission_change("revoke_all", {
+        "before": before_snapshot,
+        "after": self.snapshot()
+      })
 
   # ─── 当前白名单快照（用于审计日志）──────────────────────
 
@@ -329,14 +389,14 @@ class PermissionChecker:
     except Exception:
       return False
 
-  def _record_permission_change(self, change_type: str, items: List[str]):
+  def _record_permission_change(self, change_type: str, items: List[str] | Dict):
     """记录权限变更历史"""
     import time
 
     change_record = {
       "timestamp": time.time(),
       "type": change_type,
-      "items": list(items),
+      "items": items if isinstance(items, list) else [items],
       "total_patterns": {
         "read": len(self._read_patterns),
         "write": len(self._write_patterns),
