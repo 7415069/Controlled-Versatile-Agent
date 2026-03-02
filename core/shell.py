@@ -17,7 +17,6 @@ import time
 import unicodedata
 import uuid
 from typing import Dict, List, Optional
-from functools import lru_cache
 
 from core.audit import AuditLogger
 from core.escalation import EscalationManager, PreScreenResult
@@ -194,15 +193,24 @@ class UniversalShell:
 
   # ── 辅助方法 ──
 
-  def _safe_input(self, prompt: str) -> str:
+  def safe_input(self, prompt: str) -> str:
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    line = sys.stdin.buffer.readline()
     try:
-      return input(prompt).strip()
+      return line.decode('utf-8').strip()
     except UnicodeDecodeError:
-      print("\n[系统] 输入包含非标准字符，尝试自动修复...")
-      raw_data = sys.stdin.buffer.readline()
-      return raw_data.decode(sys.stdin.encoding or 'utf-8', errors='replace').strip()
-    except EOFError:
-      return ""
+      return line.decode('gbk', errors='replace').strip()
+
+  # def _safe_input(self, prompt: str) -> str:
+  #   try:
+  #     return input(prompt).strip()
+  #   except UnicodeDecodeError:
+  #     print("\n[系统] 输入包含非标准字符，尝试自动修复...")
+  #     raw_data = sys.stdin.buffer.readline()
+  #     return raw_data.decode(sys.stdin.encoding or 'utf-8', errors='replace').strip()
+  #   except EOFError:
+  #     return ""
 
   def _visual_len(self, text: str) -> int:
     """计算字符串的视觉宽度"""
@@ -250,7 +258,7 @@ class UniversalShell:
       1. 读: {current_perms['read']} | 写: {current_perms['write']} | 命令: {current_perms['shell']}
       2. 💡 提示：底座会自动对旧消息历史进行"脱水"处理以节省 Token。
       """
-).strip()
+                                 ).strip()
     return f"{base_prompt}\n\n{law_prompt}"
 
   def _prepare_dehydrated_messages(self, keep_last_n: int = 4) -> List[Dict]:
@@ -350,9 +358,9 @@ class UniversalShell:
     if result is None:
       return PreScreenResult(is_necessary=True, reasoning="调用失败。")
     return PreScreenResult(
-      is_necessary=bool(result.get("is_necessary")),
-      reasoning=str(result.get("reasoning")),
-      alternative=str(result.get("alternative"))
+        is_necessary=bool(result.get("is_necessary")),
+        reasoning=str(result.get("reasoning")),
+        alternative=str(result.get("alternative"))
     )
 
   def _context_summary(self, last_n: int = 6) -> str:

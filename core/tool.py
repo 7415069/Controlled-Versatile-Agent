@@ -213,8 +213,7 @@ class WriteFileTool(Tool):
   # 内容大小限制常量
   MAX_CONTENT_SIZE = 50 * 1024 * 1024  # 50MB
 
-  def execute(self, path: str, content: str,
-      encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
+  def execute(self, path: str, content: str, encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
@@ -225,7 +224,7 @@ class WriteFileTool(Tool):
 
     content_bytes = content.encode(encoding)
     if len(content_bytes) > self.MAX_CONTENT_SIZE:
-      return err("CONTENT_TOO_LARGE", f"内容过大超过 {self.MAX_CONTENT_SIZE // (1024*1024)}MB 限制")
+      return err("CONTENT_TOO_LARGE", f"内容过大超过 {self.MAX_CONTENT_SIZE // (1024 * 1024)}MB 限制")
 
     try:
       dir_path = os.path.dirname(real_path) or "."
