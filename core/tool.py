@@ -328,8 +328,7 @@ class RunShellTool(Tool):
   MAX_ARGS_COUNT = 100
   MAX_TIMEOUT = 300
 
-  def execute(self, command: str, timeout: int = 30,
-      cwd: Optional[str] = None, reason: str = "", **kwargs) -> Dict:
+  def execute(self, command: str, timeout: int = 30, cwd: Optional[str] = None, reason: str = "", **kwargs) -> Dict | None:
     allowed, msg = self._check(self.name, command, "shell", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
@@ -385,6 +384,7 @@ class RunShellTool(Tool):
         if attempt == max_retries:
           return err("EXEC_ERROR", f"执行失败: {str(e)}")
         time.sleep(0.1 * (attempt + 1))
+    return None
 
   def _secure_path(self, path: str) -> Optional[str]:
     try:

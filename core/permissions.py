@@ -11,7 +11,6 @@ import fnmatch
 import os
 import threading
 from typing import List, Dict, Optional
-from functools import lru_cache
 
 from core.manifest import Permissions
 

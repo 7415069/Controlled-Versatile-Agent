@@ -227,7 +227,8 @@ def convert_tool_result_to_litellm(tool_use_id: str, content: str) -> dict:
 
 
 def convert_assistant_with_tools_to_litellm(text: str, tool_calls: List[ToolCall]) -> dict:
-  msg = {"role": "assistant", "content": text if text else None}
+  # msg = {"role": "assistant", "content": text if text else None}
+  msg: Dict[str, Any] = {"role": "assistant", "content": text if text else None}
   if tool_calls:
     msg["tool_calls"] = [{"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.input, ensure_ascii=False)}} for tc in tool_calls]
   return msg
