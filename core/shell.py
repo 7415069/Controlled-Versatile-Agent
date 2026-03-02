@@ -1,12 +1,12 @@
 """
-统一底座（Universal Shell）v3.2 — 视觉对齐加固
+统一底座（Universal Shell）v3.3 — 补全缺失方法与视觉对齐
 """
 
 import json
 import sys
 import textwrap
 import time
-import unicodedata  # 新增：用于处理中文字符宽度
+import unicodedata
 import uuid
 from typing import Dict, List, Optional
 
@@ -105,10 +105,11 @@ class UniversalShell:
 
       messages_to_send = self._prepare_dehydrated_messages(keep_last_n=4)
 
+      # 调用 LLM
       response = self._llm.chat(
           messages=messages_to_send,
           system_prompt=self._get_effective_system_prompt(),
-          tools=self._build_tool_specs(),
+          tools=self._build_tool_specs(),  # 确保此方法存在
           max_tokens=self._manifest.max_tokens,
       )
 
@@ -163,6 +164,10 @@ class UniversalShell:
     print(f"   {icon} {json.dumps(result, ensure_ascii=False)[:200]}")
     return convert_tool_result_to_litellm(call_id, json.dumps(result, ensure_ascii=False))
 
+  def _build_tool_specs(self) -> List[Dict]:
+    """补全缺失的方法：将注册的工具转换为 API 定义格式"""
+    return [t.to_api_spec() for t in self._tools.values()]
+
   # ── 辅助方法 ──
 
   def _safe_input(self, prompt: str) -> str:
@@ -176,7 +181,7 @@ class UniversalShell:
       return ""
 
   def _visual_len(self, text: str) -> int:
-    """计算字符串的视觉宽度（中文字符计为2，英文字符计为1）"""
+    """计算字符串的视觉宽度"""
     length = 0
     for char in text:
       if unicodedata.east_asian_width(char) in ('W', 'F'):
@@ -186,7 +191,7 @@ class UniversalShell:
     return length
 
   def _pad_line(self, label: str, value: str, width: int = 56) -> str:
-    """对一行 Banner 内容进行视觉宽度填充对齐"""
+    """对一行内容进行视觉宽度对齐"""
     line_content = f"  {label:<10}: {value}"
     vlen = self._visual_len(line_content)
     padding = " " * max(0, width - vlen)
@@ -204,7 +209,9 @@ class UniversalShell:
     title = " 受控百变智能体 (CVA) v2  —  启动中 "
     v_title_len = self._visual_len(title)
     title_padding = " " * ((inner_width - v_title_len) // 2)
-    print(f"║{title_padding}{title}{title_padding} ║")
+    # 处理奇数宽度差
+    suffix_padding = title_padding + (" " if (inner_width - v_title_len) % 2 != 0 else "")
+    print(f"║{title_padding}{title}{suffix_padding}║")
     print("╠" + line + "╣")
     print(self._pad_line("角色", m.role_name))
     print(self._pad_line("模型", self._model))
