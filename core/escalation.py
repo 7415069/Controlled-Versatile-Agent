@@ -4,6 +4,7 @@
 """
 
 import fnmatch
+import sys
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -227,7 +228,7 @@ class EscalationManager:
           icon='warning'
       )
 
-      if choice is True:  # 批准
+      if choice:  # 批准
         self.approve(req.request_id)
         print("  ✅ [GUI] 已批准，权限白名单已更新。")
         root.destroy()
