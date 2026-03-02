@@ -1,9 +1,13 @@
 """
-统一底座（Universal Shell）v3.4 - 性能优化版
+统一底座（Universal Shell）v3.5 - Token优化版
 优化内容：
 - 消息脱水性能优化：缓存解析结果，减少重复计算
 - Token估算优化：增加缓存时间，减少计算频率
 - 工具执行失败处理：改进错误处理逻辑
+- 脱水缓存时间延长：10秒 -> 60秒
+- 保留消息数减少：4条 -> 3条
+- 脱水触发阈值降低：2000字符 -> 1000字符
+- System Prompt简化：减少权限列表冗余
 """
 
 import json
@@ -76,7 +80,7 @@ class UniversalShell:
     # 性能优化：缓存脱水结果
     self._dehydration_cache: Dict[int, Dict] = {}
     self._last_dehydration_time = 0.0
-    self._DEHYDRATION_CACHE_TTL = 10.0  # 缓存10秒
+    self._DEHYDRATION_CACHE_TTL = 60.0  # 缓存60秒，减少重复计算
 
   # ── 生命周期 ───────────────────────────────────────────────
 
@@ -116,7 +120,7 @@ class UniversalShell:
       tok = self._memory.token_estimate()
       print(f"\n[CVA] ── 第 {self._iteration} 轮推理（≈{tok:,} tokens）──")
 
-      messages_to_send = self._prepare_dehydrated_messages(keep_last_n=4)
+      messages_to_send = self._prepare_dehydrated_messages(keep_last_n=3)
 
       # 调用 LLM
       response = self._llm.chat(
@@ -302,7 +306,7 @@ class UniversalShell:
     """快速判断是否需要脱水"""
     return ("artifact_type" in content and
             '"file_content"' in content and
-            len(content) > 2000)
+            len(content) > 1000)
 
   def _extract_python_outline(self, code: str) -> str:
     """提取Python代码大纲"""

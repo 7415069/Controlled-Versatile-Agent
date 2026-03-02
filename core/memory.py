@@ -1,9 +1,10 @@
 """
-上下文记忆模块（Memory Store）v2.1 - 性能优化版
+上下文记忆模块（Memory Store）v2.2 - Token优化版
 优化内容：
-- Token估算缓存时间延长：从5秒延长到30秒
+- Token估算缓存时间延长：从30秒延长到60秒
 - 优化token估算算法：减少不必要的字符串操作
 - 改进文件操作：使用更高效的写入策略
+- 默认token预算降低：80000 -> 50000，更早触发截断
 """
 
 import json
@@ -78,7 +79,7 @@ class MemoryStore:
     self._stats = MemoryStats()
     self._last_token_calc_time = 0.0
     self._cached_token_estimate = 0
-    self._TOKEN_CACHE_TTL = 30.0  # 延长缓存时间到30秒
+    self._TOKEN_CACHE_TTL = 60.0  # 延长缓存时间到60秒
 
     # 错误恢复
     self._corruption_detected = False

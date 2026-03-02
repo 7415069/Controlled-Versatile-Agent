@@ -52,7 +52,7 @@ def main():
   parser.add_argument("--log-dir", default="./audit-logs", help="审计日志目录（默认: ./audit-logs）")
   parser.add_argument("--max-iterations", type=int, default=100, help="最大推理轮次（默认: 100）")
   parser.add_argument("--max-memory-messages", type=int, default=200, help="内存中最大消息条数（默认: 200）")
-  parser.add_argument("--max-token-budget", type=int, default=80000, help="触发上下文截断的 token 估算上限（默认: 80000）")
+  parser.add_argument("--max-token-budget", type=int, default=50000, help="触发上下文截断的 token 估算上限（默认: 50000）")
   args = parser.parse_args()
 
   # 加载 manifest（用于获取 role_name）

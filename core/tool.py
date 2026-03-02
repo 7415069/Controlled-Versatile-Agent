@@ -1,9 +1,10 @@
 """
-原子工具集（Tool Catalog）v3.1 - 性能与体验优化版
+原子工具集（Tool Catalog）v3.2 - Token优化版
 优化内容：
 - 搜索工具添加进度反馈
 - 改进错误处理，使用更具体的异常类型
 - 优化文件大小检查逻辑
+- 降低默认文件读取限制：50000 -> 30000字符，节省token
 """
 
 import glob as glob_module
@@ -140,7 +141,7 @@ class ReadFileTool(Tool):
   MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
   def execute(self, path: str, encoding: str = "utf-8",
-      max_chars: int = 50000, reason: str = "", **kwargs) -> Dict:
+      max_chars: int = 30000, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
