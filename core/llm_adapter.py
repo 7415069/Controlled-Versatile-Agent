@@ -103,13 +103,11 @@ class LLMAdapter:
     logger.info(f"LLM 调用参数: {kwargs}")
     return completion(**kwargs)
 
-  def chat(self, messages: List[Dict], system_prompt: str, tools: Optional[List[Dict]] = None,
-      max_tokens: int = 8192, temperature: float = 0.0) -> LLMResponse:
+  def chat(self, messages: List[Dict], system_prompt: str, tools: Optional[List[Dict]] = None, max_tokens: int = 8192, temperature: float = 0.0) -> LLMResponse:
     start_time = time.time()
     validation_error = self._validate_chat_request(messages, system_prompt, tools, max_tokens)
     if validation_error:
-      return LLMResponse(text=f"[请求验证失败] {validation_error}", tool_calls=[], finish_reason="error",
-                         error=LLMError(LLMErrorType.INVALID_REQUEST, validation_error), response_time=time.time() - start_time)
+      return LLMResponse(text=f"[请求验证失败] {validation_error}", tool_calls=[], finish_reason="error", error=LLMError(LLMErrorType.INVALID_REQUEST, validation_error), response_time=time.time() - start_time)
 
     response, error = self._call_with_retry(self._do_chat_call, messages, system_prompt, tools, max_tokens, temperature)
     response_time = time.time() - start_time
