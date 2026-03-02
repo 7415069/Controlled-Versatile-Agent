@@ -189,88 +189,132 @@ class EscalationManager:
     return req
 
   def _ask_human(self, req: EscalationRequest) -> tuple[bool, str]:
-    """控制台交互式审批"""
+    """
+    优先使用图形化审批，如果不可用则回退到控制台交互式审批。
+    """
+    # 先在终端打印一份背景，方便审计和查阅
     print("\n" + "═" * 60)
-    print("⚠️  [CVA 权限申请] — 需要您的授权")
+    print("⚠️  [CVA 权限安全审计] 拦截到越权请求")
     print("═" * 60)
     print(f"  申请 ID   : {req.request_id}")
     print(f"  工具      : {req.tool_name}")
     print(f"  申请路径  : {req.requested_path}")
     print(f"  权限类型  : {req.permission_type}")
     print(f"  申请理由  : {req.reason or '（未提供）'}")
-    if req.context_summary:
-      print(f"  上下文摘要: {req.context_summary[:200]}")
-    print("─" * 60)
-    print("  选项:")
-    print("  [y]  批准（授予申请路径权限）")
-    print("  [n]  拒绝")
-    print("  [m]  修改路径后批准（输入新路径）")
     print("─" * 60)
 
-    import signal
-
-    # 超时处理
-    timeout = self._policy.timeout_seconds
-
-    def _timeout_handler(signum, frame):
-      raise TimeoutError()
-
+    # 1. 尝试使用 GUI 审批 (基于 tkinter)
     try:
-      signal.signal(signal.SIGALRM, _timeout_handler)
-      signal.alarm(timeout)
-      choice = input(f"  请输入选项 (超时 {timeout}s 自动拒绝): ").strip().lower()
-      signal.alarm(0)
-    except (TimeoutError, EOFError):
-      signal.alarm(0)
-      print(f"\n  [超时] {timeout}s 内未响应，自动拒绝。")
-      req.status = EscalationStatus.TIMEOUT
-      req.decision_time = datetime.now(timezone.utc).isoformat()
-      self._audit("ESCALATION_DENIED", {
-        "request_id": req.request_id,
-        "deny_reason": "timeout",
-      })
-      return False, f"权限申请超时（{timeout}s），访问 `{req.requested_path}` 被拒绝。"
+      import tkinter as tk
+      from tkinter import messagebox, simpledialog
+
+      root = tk.Tk()
+      root.withdraw()  # 隐藏主窗口
+      root.attributes("-topmost", True)  # 置顶
+
+      info_text = (
+        f"工具: {req.tool_name}\n"
+        f"类型: {req.permission_type.upper()}\n"
+        f"路径: {req.requested_path}\n\n"
+        f"大脑理由:\n{req.reason or '未说明理由'}"
+      )
+
+      # 弹出对话框: Yes=批准, No=拒绝, Cancel=修改路径批准
+      choice = messagebox.askyesnocancel(
+          title="⚠️ CVA 权限申请",
+          message=info_text,
+          detail="[是] 批准申请路径\n[否] 拒绝本次操作\n[取消] 修改路径后授权",
+          icon='warning'
+      )
+
+      if choice is True:  # 批准
+        self.approve(req.request_id)
+        print("  ✅ [GUI] 已批准，权限白名单已更新。")
+        root.destroy()
+        return True, ""
+
+      elif choice is False:  # 拒绝
+        deny_reason = simpledialog.askstring("拒绝理由", "请输入拒绝原因(可选):", parent=root)
+        self.deny(req.request_id, deny_reason or "人类直接拒绝")
+        print(f"  ❌ [GUI] 已拒绝。原因: {deny_reason or '无'}")
+        root.destroy()
+        return False, f"访问被人类导师拒绝: {deny_reason or ''}"
+
+      elif choice is None:  # 修改路径 (原 m 选项)
+        new_path = simpledialog.askstring(
+            "修改路径",
+            f"原申请: {req.requested_path}\n请输入批准的新路径(多个用逗号分隔):",
+            initialvalue=req.requested_path,
+            parent=root
+        )
+        if new_path:
+          paths = [p.strip() for p in new_path.split(",") if p.strip()]
+          self.approve(req.request_id, paths)
+          print(f"  ✅ [GUI] 已批准修改后的路径: {paths}")
+          root.destroy()
+          return True, ""
+        else:
+          self.deny(req.request_id, "修改路径为空")
+          print("  ❌ [GUI] 修改路径为空，拒绝。")
+          root.destroy()
+          return False, "修改路径为空，视为拒绝"
+
+      root.destroy()
+    except Exception as e:
+      # 如果 GUI 初始化失败（如 Headless 环境），则降级到控制台模式
+      print(f"  [系统提示] 图形界面不可用 ({e})，正在切换到控制台审批模式...")
+
+    # 2. 降级：控制台交互式审批 (原逻辑抄写，增加兼容性处理)
+    print("  选项: [y]批准 [n]拒绝 [m]修改路径后批准")
+    print("─" * 60)
+
+    # 处理超时逻辑，仅在非 Windows 下使用 signal.alarm
+    timeout = self._policy.timeout_seconds
+    choice = None
+
+    if sys.platform != "win32":
+      import signal
+      def _timeout_handler(signum, frame):
+        raise TimeoutError()
+
+      try:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(timeout)
+        choice = input(f"  请输入选项 ({timeout}s 超时): ").strip().lower()
+        signal.alarm(0)
+      except (TimeoutError, EOFError):
+        signal.alarm(0)
+        print(f"\n  [超时] {timeout}s 内未响应，自动拒绝。")
+        req.status = EscalationStatus.TIMEOUT
+        req.decision_time = datetime.now(timezone.utc).isoformat()
+        self._audit("ESCALATION_DENIED", {"request_id": req.request_id, "deny_reason": "timeout"})
+        return False, f"权限申请超时（{timeout}s），访问 `{req.requested_path}` 被拒绝。"
+    else:
+      # Windows 平台不支持超时闹钟，使用标准 input
+      try:
+        choice = input(f"  请输入选项: ").strip().lower()
+      except EOFError:
+        return False, "无法读取输入"
 
     if choice == "y":
       self.approve(req.request_id)
-      print(f"  ✅ 已批准，权限白名单已更新。")
-      print("═" * 60 + "\n")
+      print(f"  ✅ [Console] 已批准。")
       return True, ""
 
     elif choice == "m":
-      try:
-        signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(60)
-        new_path = input("  请输入批准的路径（多个路径用逗号分隔）: ").strip()
-        signal.alarm(0)
-      except (TimeoutError, EOFError):
-        signal.alarm(0)
-        new_path = ""
-
+      new_path = input("  请输入批准的新路径 (多个逗号分隔): ").strip()
       if new_path:
         paths = [p.strip() for p in new_path.split(",") if p.strip()]
         self.approve(req.request_id, paths)
-        print(f"  ✅ 已批准路径: {paths}")
-        print("═" * 60 + "\n")
+        print(f"  ✅ [Console] 已批准路径: {paths}")
         return True, ""
       else:
-        self.deny(req.request_id, "修改路径为空，视为拒绝")
-        print("  ❌ 路径为空，已拒绝。")
-        print("═" * 60 + "\n")
-        return False, f"访问 `{req.requested_path}` 被拒绝：修改路径为空。"
+        self.deny(req.request_id, "修改路径为空")
+        return False, "修改路径为空，视为拒绝"
 
     else:
-      try:
-        signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(30)
-        deny_reason = input("  拒绝原因（可选，直接回车跳过）: ").strip()
-        signal.alarm(0)
-      except (TimeoutError, EOFError):
-        signal.alarm(0)
-        deny_reason = ""
-
+      deny_reason = input("  拒绝原因 (可选): ").strip()
       self.deny(req.request_id, deny_reason)
-      print(f"  ❌ 已拒绝。")
-      print("═" * 60 + "\n")
+      print(f"  ❌ [Console] 已拒绝。")
       reason_text = f"，原因：{deny_reason}" if deny_reason else ""
       return False, f"访问 `{req.requested_path}` 被人类导师拒绝{reason_text}。"

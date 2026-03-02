@@ -87,16 +87,14 @@ class ListDirectoryTool(BaseTool):
 
 class ReadFileTool(BaseTool):
   name = "read_file"
-  description = "读取文件内容并返回。支持文本文件，超大文件自动截断。"
+  description = "读取文件。如果你认为该文件不在你的初始白名单内，请在 reason 参数中详细说明你读取该文件的必要性，以说服导师为你提权。"
   input_schema = {
     "type": "object",
     "properties": {
-      "path": {"type": "string", "description": "文件路径"},
-      "encoding": {"type": "string", "description": "字符编码（默认 utf-8）"},
-      "max_chars": {"type": "integer", "description": "最大返回字符数（默认 50000）"},
-      "reason": {"type": "string"},
+      "path": {"type": "string", "description": "完整路径"},
+      "reason": {"type": "string", "description": "【关键】如果路径可能越权，请提供申请理由"},
     },
-    "required": ["path"],
+    "required": ["path", "reason"],  # 强制要求理由
   }
 
   def execute(self, path: str, encoding: str = "utf-8",

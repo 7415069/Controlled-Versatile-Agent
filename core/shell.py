@@ -3,6 +3,7 @@
 """
 
 import json
+import textwrap
 import time
 import uuid
 from typing import Dict, List, Optional
@@ -124,7 +125,7 @@ class UniversalShell:
 
       response = self._llm.chat(
           messages=self._memory.messages,
-          system_prompt=self._manifest.identity_prompt,
+          system_prompt=self._get_effective_system_prompt(),
           tools=self._build_tool_specs(),
           max_tokens=self._manifest.max_tokens,
       )
@@ -234,6 +235,29 @@ class UniversalShell:
     print(f"║  写权限     : {str(m.init_permissions.write)[:46]:<46}║")
     print(f"║  命令白名单 : {str(m.init_permissions.shell)[:46]:<46}║")
     print("╚" + "═" * 60 + "╝")
+
+  def _get_effective_system_prompt(self) -> str:
+    """
+    将 Manifest 中的灵魂注入，并叠加受控底座的‘法律条文’
+    """
+    base_prompt = self._manifest.identity_prompt
+
+    # 获取当前权限白名单的快照，告诉模型它现在能干什么
+    current_perms = self._perm.snapshot()
+
+    # 法律条文（底座强制注入）
+    law_prompt = textwrap.dedent(f"""
+      ### ⚠️ 运行环境与权限准则 (必读) ⚠️
+      1. 你当前运行在“受控百变智能体 (CVA)”底座上。
+      2. 你当前的【初始合法领地】为:
+         - 读: {current_perms['read']}
+         - 写: {current_perms['write']}
+         - 命令: {current_perms['shell']}
+      3. 如果你需要操作领地之外的资源，你必须调用工具并提供详尽的 'reason'。
+      4. 你的 reason 会被直接展示给人类导师（老板）。如果理由不充分，老板会拒绝你的提权申请。
+      5. 严禁猜测路径。请先使用 list_directory 探索环境，看准了再发起越权申请。
+      """).strip()
+    return f"{base_prompt}\n\n{law_prompt}"
 
 
 def _hash(text: str) -> str:
