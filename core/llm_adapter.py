@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, TypeVar, cast, Any
 import litellm
 from litellm import completion
 
+from core.logger import trace_logger
+
 logger = logging.getLogger(__name__)
 litellm.set_verbose = False
 T = TypeVar("T")
@@ -103,10 +105,19 @@ class LLMAdapter:
     if validation_error:
       return LLMResponse(text=f"[请求验证失败] {validation_error}", tool_calls=[], finish_reason="error", error=LLMError(LLMErrorType.INVALID_REQUEST, validation_error), response_time=time.time() - start_time)
 
+    full_payload = [{"role": "system", "content": system_prompt}] + messages
+    trace_logger.debug(f"--- [LLM REQUEST] ---")
+    trace_logger.debug(f"Model: {self._model}")
+    trace_logger.debug(f"Full Payload:\n{full_payload}")
+    trace_logger.debug(f"Message History Count: {len(messages)}")
+
     response, error = self._call_with_retry(self._do_chat_call, messages, system_prompt, tools, max_tokens, temperature)
     response_time = time.time() - start_time
     self._update_stats(response, error, response_time)
     if response:
+      trace_logger.debug(f"--- [LLM RESPONSE] ---")
+      trace_logger.debug(f"Finish Reason: {response.finish_reason}")
+      trace_logger.debug(f"Text Content: {response.text[:500]}...")  # 避免过长
       response.response_time = response_time
     return response or LLMResponse(text=f"[LLM 调用失败] {error.message if error else '未知错误'}", tool_calls=[], finish_reason="error", error=error, response_time=response_time)
 
@@ -223,12 +234,26 @@ def _convert_tools_to_litellm(tools):
 
 
 def convert_tool_result_to_litellm(tool_use_id: str, content: str) -> dict:
-  return {"role": "user", "tool_call_id": tool_use_id, "content": content}
+  # 必须使用 tool 角色，内容不能为空
+  return {
+    "role": "tool",
+    "tool_call_id": tool_use_id,
+    "content": content if content else "{}"
+  }
 
 
 def convert_assistant_with_tools_to_litellm(text: str, tool_calls: List[ToolCall]) -> dict:
-  # msg = {"role": "assistant", "content": text if text else None}
-  msg: Dict[str, Any] = {"role": "assistant", "content": text if text else None}
+  # DeepSeek 建议 content 为字符串而非 None
+  msg: Dict[str, Any] = {"role": "assistant", "content": text if text else ""}
   if tool_calls:
-    msg["tool_calls"] = [{"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.input, ensure_ascii=False)}} for tc in tool_calls]
+    msg["tool_calls"] = [
+      {
+        "id": tc.id,
+        "type": "function",
+        "function": {
+          "name": tc.name,
+          "arguments": json.dumps(tc.input, ensure_ascii=False)
+        }
+      } for tc in tool_calls
+    ]
   return msg

@@ -48,6 +48,8 @@ class RoleManifest:
     "ask_human",
     "search_files",
     "http_request",
+    "submit_plan",
+    "execute_python",
   }
 
   def validate(self):

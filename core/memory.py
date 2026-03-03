@@ -567,24 +567,28 @@ class MemoryStore:
           pass
 
   def _maybe_trim(self):
-    # 如果没超预算则不处理
     if len(self._messages) <= self._max_messages and self.token_estimate() <= self._max_token_budget:
       return
 
-    # 重点：确保裁剪后的第一条消息必须是 'user' 角色
-    # 且不能是某个 tool_call 的后续。
-    start_idx = len(self._messages) // 4
+    # 找到一个安全的截断点：必须是 user 消息，且其后不能立即跟随 tool 角色
+    # 目标是确保不会切断 Assistant(tool_calls) -> Tool(result) 的序列
+    target_idx = len(self._messages) // 4
 
-    while start_idx < len(self._messages):
-      msg = self._messages[start_idx]
-      # 1. 必须是 user 消息开头
-      # 2. 或者是不带 tool_calls 的 assistant 消息
+    start_idx = 0
+    for i in range(target_idx, len(self._messages)):
+      msg = self._messages[i]
+      # 1. 必须是 user 角色
+      # 2. 确保不是 tool_result (我们在 adapter 修复了 role)
       if msg.get("role") == "user":
+        # 检查下一条，确保不是在工具链中间
+        if i + 1 < len(self._messages) and self._messages[i + 1].get("role") == "tool":
+          continue
+        start_idx = i
         break
-      start_idx += 1
 
-    print(f"[Memory] ✂️  智能对齐截断：从第 {start_idx} 条开始保留")
-    self._messages = self._messages[start_idx:]
+    if start_idx > 0:
+      print(f"[Memory] ✂️  安全截断：从第 {start_idx} 条开始保留")
+      self._messages = self._messages[start_idx:]
 
   def _update_stats(self):
     """更新统计信息"""

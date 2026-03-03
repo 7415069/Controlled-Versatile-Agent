@@ -26,6 +26,7 @@ class PermissionChecker:
   """
 
   def __init__(self, init_permissions: Permissions):
+    self._list_patterns: List[str] = list(init_permissions.list)
     self._read_patterns: List[str] = list(init_permissions.read)
     self._write_patterns: List[str] = list(init_permissions.write)
     self._shell_prefixes: List[str] = list(init_permissions.shell)
@@ -56,6 +57,7 @@ class PermissionChecker:
     self._cache_max_size = 1000
     self._cache_hits = 0
     self._cache_misses = 0
+    os.makedirs("./agent_workspace", exist_ok=True)
 
   # ─── 权限检查 ──────────────────────────────────────────────
 

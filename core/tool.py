@@ -713,6 +713,69 @@ class HttpRequestTool(Tool):
       return err("HTTP_ERROR", str(e))
 
 
+class SubmitPlanTool(Tool):
+  name = "submit_plan"
+  description = "提交或更新你的行动计划。在执行复杂任务前必用。系统会记录该计划并用于后续进度审计。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "goal": {"type": "string", "description": "最终目标"},
+      "milestones": {"type": "array", "items": {"type": "string"}, "description": "关键步骤分解"},
+      "strategy": {"type": "string", "description": "采用的策略（例如：先搜索后修改，或编写 Python 脚本批量处理）"}
+    },
+    "required": ["goal", "milestones"]
+  }
+
+  def execute(self, goal: str, milestones: list, strategy: str = "", **kwargs) -> Dict:
+    # 纯记录工具，返回确认信息
+    return ok({
+      "status": "PLAN_ACCEPTED",
+      "message": "计划已备案。请开始按计划执行，并在遇到重大阻碍时更新计划。",
+      "current_goal": goal
+    })
+
+
+class ExecutePythonTool(Tool):
+  name = "execute_python_script"
+  description = "【高阶工具】在受控环境中执行一段 Python 代码。适合处理大批量文件、复杂逻辑计算或自定义数据分析。代码可以直接使用标准库。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "script": {"type": "string", "description": "完整的 Python 代码字符串"},
+      "reason": {"type": "string", "description": "执行该脚本的目的"}
+    },
+    "required": ["script"]
+  }
+
+  def execute(self, script: str, reason: str = "", **kwargs) -> Dict:
+    # 强制走越权审批，因为脚本能力太强
+    allowed, msg = self._check(self.name, "PythonRuntime", "shell", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as tmp:
+      tmp.write(script)
+      tmp_path = tmp.name
+
+    try:
+      # 限制执行时间
+      result = subprocess.run(
+          [sys.executable, tmp_path],
+          capture_output=True, text=True, timeout=60
+      )
+      return ok({
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.returncode
+      })
+    except Exception as e:
+      return err("EXECUTION_ERROR", str(e))
+    finally:
+      if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+
 # ─── 工具注册表 ───────────────────────────────────────────────
 
 TOOL_REGISTRY = {
@@ -728,6 +791,8 @@ TOOL_REGISTRY = {
   "ask_human": AskHumanTool,
   "search_files": SearchFilesTool,
   "http_request": HttpRequestTool,
+  "submit_plan": SubmitPlanTool,
+  "execute_python": ExecutePythonTool,
 }
 
 

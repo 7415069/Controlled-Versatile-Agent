@@ -26,6 +26,7 @@ from core.llm_adapter import (
   convert_assistant_with_tools_to_litellm,
   convert_tool_result_to_litellm,
 )
+from core.logger import sys_logger
 from core.manifest import load_manifest, RoleManifest
 from core.memory import MemoryStore
 from core.permissions import PermissionChecker
@@ -133,10 +134,22 @@ class UniversalShell:
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 3
 
+    sys_logger.info(f"开始任务循环。Session ID: {self._memory.session_id}")
     while self._iteration < self._max_iterations:
+      # 只有当上一条消息不是 tool_calls 时，才插入系统指令
+      last_msg = self._memory.messages[-1] if self._memory.messages else {}
+      is_in_middle_of_tools = last_msg.get("role") == "assistant" and "tool_calls" in last_msg
+
+      if self._iteration > 0 and self._iteration % 5 == 0 and not is_in_middle_of_tools:
+        self._memory.append({
+          "role": "system",
+          "content": "**自主反思指令**：你已执行多轮操作。请评估当前进度，是否需要修正计划？"
+        })
+
       self._iteration += 1
       tok = self._memory.token_estimate()
-      print(f"\n[CVA] ── 第 {self._iteration} 轮推理（≈{tok:,} tokens）──")
+      # print(f"\n[CVA] ── 第 {self._iteration} 轮推理（≈{tok:,} tokens）──")
+      sys_logger.info(f"===== 第 {self._iteration} 轮迭代开始，当前内存消息数: {len(self._memory.messages)}，预估 Token: {tok} =====")
 
       # messages_to_send = self._prepare_dehydrated_messages(keep_last_n=3)
       messages_to_send = self._memory.prepare_for_llm(keep_last_n=3)
@@ -271,6 +284,19 @@ class UniversalShell:
     print("╚" + line + "╝")
 
   def _get_effective_system_prompt(self) -> str:
+
+    llm_stats = self._llm.stats
+    mem_stats = self._memory.stats
+
+    cost_report = textwrap.dedent(f"""
+      ---
+      ### 💰 资源消耗报告 (Resource Usage)
+      - 本次会话累计调用: {llm_stats.total_calls} 次
+      - 累计消耗 Token: {llm_stats.total_tokens:,}
+      - 内存上下文长度: {mem_stats.memory_messages} 条消息 (预估 {mem_stats.token_estimate} tokens)
+      - 提示：请评估任务复杂度与 Token 消耗。如果消耗过快且无进展，请反思并切换更高效的策略（如编写批量处理脚本）。
+    """).strip()
+
     # 1. 获取 YAML 中定义的原始 identity_prompt
     raw_prompt = self._manifest.identity_prompt
     # 2. 获取能力和权限列表
@@ -294,7 +320,7 @@ class UniversalShell:
       - 提示：底座会自动对旧消息历史进行脱水，如需查看完整代码请重新 read_file。
     """).strip()
 
-    return f"{effective_prompt}\n\n{law_prompt}"
+    return f"{effective_prompt}\n\n{cost_report}\n\n{law_prompt}"
 
   # def _prepare_dehydrated_messages(self, keep_last_n: int = 3) -> List[Dict]:
   #   """
