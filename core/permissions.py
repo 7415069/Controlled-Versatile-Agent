@@ -432,16 +432,6 @@ class PermissionChecker:
       return None
 
   def _match_path(self, normalized_path: str, patterns: List[str]) -> bool:
-    """
-    安全的路径匹配逻辑（优化版）
-
-    匹配策略：
-    1. 精确匹配
-    2. Glob模式匹配
-    3. 前缀匹配（目录包含）
-
-    优化：提前返回，减少不必要的遍历
-    """
     try:
       for pattern in patterns:
         if not pattern:
@@ -452,15 +442,21 @@ class PermissionChecker:
         if norm_pattern is None:
           continue
 
-        # 精确匹配（最快）
+        # 1. 精确匹配
         if normalized_path == norm_pattern:
           return True
 
-        # 前缀匹配（次快）
-        if normalized_path.startswith(norm_pattern + os.sep):
+        # 2. 目录前缀匹配 (核心修复点)
+        # 如果模式是 /path/** 或 /path/*，则 /path 目录本身也应该允许访问
+        base_dir = norm_pattern.rstrip('*').rstrip(os.sep)
+        if normalized_path == base_dir:
           return True
 
-        # Glob匹配（最慢，放在最后）
+        # 3. 前缀包含匹配
+        if normalized_path.startswith(base_dir + os.sep):
+          return True
+
+        # 4. Glob匹配 (fallback)
         if fnmatch.fnmatch(normalized_path, norm_pattern):
           return True
 

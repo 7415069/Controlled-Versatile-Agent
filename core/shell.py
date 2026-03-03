@@ -464,6 +464,7 @@ class UniversalShell:
       "required": ["is_necessary", "reasoning", "alternative"],
     }
     user_message = f"评估必要性：\n工具: {req.tool_name}\n路径: {req.requested_path}\n理由: {req.reason}"
+
     result = self._llm.structured_chat(
         messages=[{"role": "user", "content": user_message}],
         system_prompt="你是 CVA 安全模块。判断越权请求是否必须。",
@@ -474,11 +475,7 @@ class UniversalShell:
     )
     if result is None:
       return PreScreenResult(is_necessary=True, reasoning="调用失败。")
-    return PreScreenResult(
-        is_necessary=bool(result.get("is_necessary")),
-        reasoning=str(result.get("reasoning")),
-        alternative=str(result.get("alternative"))
-    )
+    return PreScreenResult(is_necessary=bool(result.get("is_necessary")), reasoning=str(result.get("reasoning")), alternative=str(result.get("alternative")))
 
   def _context_summary(self, last_n: int = 6) -> str:
     """生成上下文摘要"""
