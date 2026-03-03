@@ -18,6 +18,7 @@ class EscalationPolicy:
 
 @dataclass
 class Permissions:
+  list: List[str] = field(default_factory=list)
   read: List[str] = field(default_factory=list)
   write: List[str] = field(default_factory=list)
   shell: List[str] = field(default_factory=list)

@@ -271,14 +271,30 @@ class UniversalShell:
     print("╚" + line + "╝")
 
   def _get_effective_system_prompt(self) -> str:
-    base_prompt = self._manifest.identity_prompt
-    current_perms = self._perm.snapshot()
+    # 1. 获取 YAML 中定义的原始 identity_prompt
+    raw_prompt = self._manifest.identity_prompt
+    # 2. 获取能力和权限列表
+    cap_json = json.dumps(self._manifest.capabilities, ensure_ascii=False, indent=2)
+    cap_json = f"```json\n{cap_json}\n```"
+
+    perm_json = json.dumps(self._perm.snapshot(), ensure_ascii=False, indent=2)
+    perm_json = f"```json\n{perm_json}\n```"
+
+    # 3. 执行变量替换
+    # 这样 YAML 里的 ${capabilities} 和 ${init_permissions} 就会变成真实数据
+    effective_prompt = raw_prompt.replace("${capabilities}", cap_json)
+    effective_prompt = effective_prompt.replace("${permissions}", perm_json)
+
+    # 4. 额外补充当前的运行时环境（可选，但极有用）
     law_prompt = textwrap.dedent(f"""
-      ### ⚠️ 运行环境与权限准则 (必读) ⚠️
-      1. 读: {current_perms['read']} | 写: {current_perms['write']} | 命令: {current_perms['shell']}
-      2. 💡 提示：底座会自动对旧消息历史进行"脱水"处理以节省 Token。
-      """).strip()
-    return f"{base_prompt}\n\n{law_prompt}"
+      ---
+      ### ⚡ 运行时状态 (实时更新)
+      - 当前会话 ID: {self._memory.session_id}
+      - 迭代次数: {self._iteration}/{self._max_iterations}
+      - 提示：底座会自动对旧消息历史进行脱水，如需查看完整代码请重新 read_file。
+    """).strip()
+
+    return f"{effective_prompt}\n\n{law_prompt}"
 
   # def _prepare_dehydrated_messages(self, keep_last_n: int = 3) -> List[Dict]:
   #   """
