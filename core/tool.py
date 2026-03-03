@@ -321,7 +321,8 @@ class ReadFileTool(Tool):
           "total_lines": total_lines,
           "is_full_text": (start_idx == 0 and end_idx == total_lines)
         },
-        "content": content
+        "content": content,
+        "can_dehydrate": True
       })
     except Exception as e:
       return err("IO_ERROR", str(e))

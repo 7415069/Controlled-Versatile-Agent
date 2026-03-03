@@ -9,6 +9,7 @@
 """
 
 import fnmatch
+import os
 import sys
 import threading
 import uuid
@@ -75,7 +76,8 @@ class EscalationManager:
       permission_checker: PermissionChecker,
       audit_log_fn: Callable,
       llm_call_fn: Optional[Callable] = None,
-      permission_ttl_hours: int = 24  # 权限有效期（小时）
+      permission_ttl_hours: int = 24,  # 权限有效期（小时）
+      use_gui: bool = True,
   ):
     self._policy = policy
     self._perm = permission_checker
@@ -86,6 +88,7 @@ class EscalationManager:
     self._pending: Dict[str, EscalationRequest] = {}
     self._approval_history: List[ApprovalRecord] = []  # 审批历史
     self._lock = threading.Lock()
+    self._use_gui = use_gui
 
   def set_llm_call_fn(self, fn: Callable):
     self._llm_call = fn
@@ -224,6 +227,11 @@ class EscalationManager:
 
   def _try_gui_approval(self, req: EscalationRequest) -> Optional[tuple[bool, str]]:
     """尝试使用 Tkinter 弹出居中的审批窗口"""
+    if not self._use_gui:
+      return None
+      # 自动检测无头环境
+    if os.environ.get("DISPLAY") is None and sys.platform != "win32":
+      return None
     try:
       import tkinter as tk
       from tkinter import messagebox, simpledialog

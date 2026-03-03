@@ -2,3 +2,5 @@ litellm
 PyYAML
 jsonschema
 python-dotenv
+pytest
+hypothesis

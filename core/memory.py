@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
+from litellm import token_counter
+
 
 # ─── 数据模型 ─────────────────────────────────────────────────
 
@@ -62,10 +64,12 @@ class MemoryStore:
       session_id: Optional[str] = None,
       max_messages: int = 200,
       max_token_budget: int = 80000,
+      model: str = "deepseek/deepseek-chat"
   ):
     self._role_name = role_name
     self._max_messages = max_messages
     self._max_token_budget = max_token_budget
+    self._model = model
 
     # 线程安全锁
     self._lock = threading.RLock()
@@ -229,47 +233,100 @@ class MemoryStore:
     self._cleanup_resources()
 
   def token_estimate(self) -> int:
-    """
-    优化的token估算（带缓存）
-    缓存时间延长到30秒，减少重复计算
-    """
     current_time = time.time()
-
-    # 缓存30秒，避免重复计算
     if (current_time - self._last_token_calc_time < self._TOKEN_CACHE_TTL and
         self._cached_token_estimate > 0):
       return self._cached_token_estimate
 
     with self._lock:
       try:
-        # 使用更高效的估算方法
-        total_chars = 0
+        total = 0
         for m in self._messages:
-          # 快速估算：直接计算字符串长度
           content = m.get("content", "")
-          if isinstance(content, str):
-            total_chars += len(content)
-          elif isinstance(content, list):
-            # 对于列表类型，只计算文本内容
-            for item in content:
-              if isinstance(item, dict):
-                total_chars += len(str(item.get("text", "")))
-              else:
-                total_chars += len(str(item))
-          else:
-            total_chars += len(str(content))
-
-          # 其他字段（role等）
-          total_chars += len(m.get("role", "")) + 20
-
-        # 使用更精确的估算：字符数/3.5（更接近实际token数）
-        self._cached_token_estimate = int(total_chars / 3.5)
+          if isinstance(content, dict):
+            content = json.dumps(content, ensure_ascii=False)
+          msg_for_count = [{"role": m.get("role", "user"), "content": str(content)}]
+          total += token_counter(model=self._model, messages=msg_for_count)
+        self._cached_token_estimate = total
         self._last_token_calc_time = current_time
-        return self._cached_token_estimate
-
+        return total
       except Exception as e:
-        print(f"[Memory] ⚠️  token估算失败: {e}")
-        return len(self._messages) * 100  # 保守估算
+        print(f"[Memory] ⚠️ litellm token_counter 失败: {e}")
+        return len(self._messages) * 120
+
+  def prepare_for_llm(self, keep_last_n: int = 3) -> List[Dict]:
+    """工业级消息脱水：活跃区原文 + 缓存区 Skeleton + 归档区折叠"""
+    raw_msgs = self.messages
+    dehydrated = []
+    total_len = len(raw_msgs)
+    active_threshold = total_len - keep_last_n
+    archive_threshold = total_len - 10
+
+    for i, msg in enumerate(raw_msgs):
+      new_msg = msg.copy()
+      if msg.get("role") != "tool":
+        dehydrated.append(new_msg)
+        continue
+
+      content_str = msg.get("content", "")
+      try:
+        data = json.loads(content_str)
+        artifact = data.get("data", {})
+        if artifact.get("can_dehydrate") and artifact.get("artifact_type") == "file_content":
+          original_code = artifact.get("content", "")
+          path = artifact.get("metadata", {}).get("path", "unknown.py")
+
+          if i < archive_threshold:
+            artifact["content"] = "[SYSTEM: 内容已过期折叠] 为节省 Token，此处代码全文已移除。如需再次查看，请重新调用 read_file。"
+            artifact["is_dehydrated"] = True
+          elif i < active_threshold:
+            skeleton = self._generate_semantic_skeleton(original_code, path)
+            artifact["content"] = f"[SYSTEM: 语义脱水] 该文件全文已转为结构大纲：\n\n{skeleton}"
+            artifact["is_skeleton"] = True
+
+          new_msg["content"] = json.dumps(data, ensure_ascii=False)
+      except (json.JSONDecodeError, TypeError, KeyError, json.decoder.JSONDecodeError):
+        pass  # 解析失败保留原文
+
+      dehydrated.append(new_msg)
+    return dehydrated
+
+  def _generate_semantic_skeleton(self, code: str, filename: str) -> str:
+    if not code:
+      return ""
+    if filename.endswith(".py"):
+      try:
+        import ast
+        tree = ast.parse(code)
+        outline = []
+        for node in ast.iter_child_nodes(tree):
+          if isinstance(node, ast.ClassDef):
+            bases = [ast.unparse(b) for b in node.bases]
+            base_str = f"({', '.join(bases)})" if bases else ""
+            methods = [f"    def {m.name}(...): ..." for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            outline.append(f"class {node.name}{base_str}:\n" + "\n".join(methods))
+          elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            outline.append(f"def {node.name}(...): ...")
+        if outline:
+          return "\n".join(outline)
+      except Exception:
+        pass
+    # 通用正则（支持 JS/TS/Java/Go 等）
+    import re
+    patterns = [
+      r'^(?:export\s+)?(?:class|function|async\s+function)\s+([a-zA-Z_][a-zA-Z0-9_]*)',
+      r'^(?:public|private|protected|static)\s+[\w<>]+\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(',
+      r'^def\s+([a-zA-Z_][a-zA-Z0-9_]*)',
+      r'^func\s+(?:\([^)]+\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)'
+    ]
+    skeleton = []
+    for line in code.split('\n'):
+      line = line.strip()
+      for p in patterns:
+        if re.match(p, line):
+          skeleton.append(line + " { ... }")
+          break
+    return "\n".join(skeleton[:50]) or "[无法提取结构，仅保留前5行]\n" + "\n".join(code.split('\n')[:5])
 
   def summary_line(self) -> str:
     """返回单行会话摘要，用于 session 列表展示"""
