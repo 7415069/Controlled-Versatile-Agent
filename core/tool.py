@@ -360,10 +360,15 @@ class BackupFileTool(Tool):
       import datetime
       import shutil
 
-      # 3. 生成带时间戳的备份路径
-      # 格式: 原文件名.20231027103000.bak
+      # 3. 生成符合格式的备份路径
+      # 获取不带后缀的路径 (base) 和 后缀 (ext)
+      base, ext = os.path.splitext(real_path)
+
+      # 格式化时间戳 (例如: 20231027_103000)
       timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-      backup_path = f"{real_path}.{timestamp}.bak"
+
+      # 拼接新路径: xxx-{timestamp}.ext
+      backup_path = f"{base}-{timestamp}{ext}"
 
       # 4. 执行物理复制 (copy2 会尝试保留元数据)
       shutil.copy2(real_path, backup_path)
