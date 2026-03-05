@@ -109,45 +109,74 @@ class FindSymbolTool(Tool):
     return ok({"symbol": symbol_name, "found_in": results})
 
 
-class GetProjectTreeTool(Tool):
-  name = "get_project_tree"
-  description = "一次性获取整个项目的目录结构树。比多次调用 list_directory 更省 Token。"
+class GetProjectSummaryTool(Tool):
+  name = "get_project_summary"
+  description = "【总览神器】一次性获取整个项目的目录结构和关键文件摘要（文件名、类型、大小、行数）。比多次调用 list_directory 更省 Token。"
   input_schema = {
     "type": "object",
     "properties": {
       "path": {"type": "string", "description": "根目录", "default": "."},
-      "depth": {"type": "integer", "description": "递归深度", "default": 3},
+      "max_depth": {"type": "integer", "description": "最大递归深度（0表示只当前目录，1表示当前目录及下一层）", "default": 3},
       "reason": {"type": "string"}
-    }
+    },
+    "required": []
   }
 
-  def execute(self, path: str = ".", depth: int = 3, reason: str = "", **kwargs) -> Dict:
+  def execute(self, path: str = ".", max_depth: int = 3, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "list", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
     real_path = self._secure_path(path)
-    tree = []
+    if real_path is None:
+      return err("INVALID_PATH", f"路径不安全或无效: {path}")
+    if not os.path.exists(real_path):
+      return err("NOT_FOUND", f"路径不存在: {path}")
+    if not os.path.isdir(real_path):
+      return err("NOT_A_DIRECTORY", f"不是目录: {path}")
 
-    def walk(current_path, current_depth):
-      if current_depth > depth:
-        return None
+    summary_items = []
+
+    def walk_and_summarize(current_dir_path, current_depth):
+      if current_depth > max_depth:
+        return
+
       try:
-        for entry in sorted(os.scandir(current_path)):
-          if entry.name.startswith(('.', '__pycache__', 'node_modules')):
+        for entry in sorted(os.scandir(current_dir_path)):
+          if entry.name.startswith(('.', '__pycache__', 'node_modules', 'venv', 'logs', 'temp_backup')):
             continue
 
-          is_dir = entry.is_dir()
-          item = {"name": entry.name, "type": "dir" if is_dir else "file"}
-          if is_dir:
-            item["children"] = walk(entry.path, current_depth + 1)
-          tree.append(item)
-      except Exception:
-        pass
-      return tree
+          full_entry_path = entry.path
+          item = {
+            "name": entry.name,
+            "type": "dir" if entry.is_dir() else "file",
+            "path": full_entry_path
+          }
 
-    result = walk(real_path, 1)
-    return ok({"tree": result})
+          if entry.is_file():
+            try:
+              item["fileSize"] = os.path.getsize(full_entry_path)
+              with open(full_entry_path, 'r', encoding='utf-8', errors='ignore') as f:
+                item["fileLines"] = sum(1 for _ in f)
+            except OSError:
+              item["fileSize"] = 0
+              item["fileLines"] = 0
+            except Exception:
+              item["fileSize"] = 0
+              item["fileLines"] = 0
+
+          summary_items.append(item)
+
+          if entry.is_dir():
+            walk_and_summarize(full_entry_path, current_depth + 1)
+      except PermissionError:
+        return
+      except Exception:
+        return
+
+    walk_and_summarize(real_path, 0)
+
+    return ok({"summary_items": summary_items})
 
 
 class GetFileSkeletonTool(Tool):
@@ -781,7 +810,7 @@ class ExecutePythonTool(Tool):
 
 TOOL_REGISTRY = {
   "find_symbol": FindSymbolTool,
-  "get_project_tree": GetProjectTreeTool,  # 注册
+  "get_project_summary": GetProjectSummaryTool,  # 注册
   "get_file_skeleton": GetFileSkeletonTool,  # 注册
   "list_directory": ListDirectoryTool,
   "read_file": ReadFileTool,
