@@ -432,37 +432,93 @@ class PermissionChecker:
       return None
 
   def _match_path(self, normalized_path: str, patterns: List[str]) -> bool:
+    """
+    AntPath 风格路径匹配。
+
+    通配符语义（与 Spring AntPathMatcher 对齐）：
+      ?   匹配单个任意字符（不含路径分隔符）
+      *   匹配同一路径段内的任意字符串（不跨 /）
+      **  匹配零个或多个完整路径段（可跨 /）
+
+    典型示例：
+      /project/**          → 匹配 /project 本身及其所有子路径
+      /project/src/*.py    → 匹配 src 下所有 .py 文件（不递归）
+      /project/**/test_*   → 匹配任意层级下以 test_ 开头的条目
+      /tmp/?/file.txt      → 匹配 /tmp/a/file.txt，不匹配 /tmp/ab/file.txt
+    """
     try:
       for pattern in patterns:
         if not pattern:
           continue
 
-        # 规范化模式
+        # 规范化模式（解析 ~、相对路径、符号链接等）
         norm_pattern = self._secure_normalize(pattern)
         if norm_pattern is None:
           continue
 
-        # 1. 精确匹配
-        if normalized_path == norm_pattern:
-          return True
-
-        # 2. 目录前缀匹配 (核心修复点)
-        # 如果模式是 /path/** 或 /path/*，则 /path 目录本身也应该允许访问
-        base_dir = norm_pattern.rstrip('*').rstrip(os.sep)
-        if normalized_path == base_dir:
-          return True
-
-        # 3. 前缀包含匹配
-        if normalized_path.startswith(base_dir + os.sep):
-          return True
-
-        # 4. Glob匹配 (fallback)
-        if fnmatch.fnmatch(normalized_path, norm_pattern):
+        if self._antpath_match(normalized_path, norm_pattern):
           return True
 
       return False
     except Exception:
       return False
+
+  def _antpath_match(self, path: str, pattern: str) -> bool:
+    """
+    核心 AntPath 匹配算法。
+
+    实现要点：
+    1. 将 path 和 pattern 均按 os.sep 拆分为段列表
+    2. 用动态规划处理 ** 可匹配零到多段的情况
+    3. ? 只匹配单个非分隔符字符，* 只匹配同一段内的字符串
+    4. 模式末尾的 ** 额外允许匹配模式前缀本身（即父目录）
+    """
+    sep = os.sep
+
+    # ── 快捷路径 ────────────────────────────────────────────
+    # 精确匹配
+    if path == pattern:
+      return True
+
+    # 模式不含通配符：只做精确匹配 + 子路径前缀匹配
+    if '*' not in pattern and '?' not in pattern:
+      return path.startswith(pattern.rstrip(sep) + sep)
+
+    # ── 拆段 ────────────────────────────────────────────────
+    path_parts = [p for p in path.split(sep) if p]
+    pat_parts = [p for p in pattern.split(sep) if p]
+
+    # ** 末尾特例：/a/b/** 也应匹配 /a/b 本身
+    if pat_parts and pat_parts[-1] == '**':
+      base = sep + sep.join(pat_parts[:-1])
+      if path == base or path.startswith(base + sep):
+        return True
+
+    # ── 动态规划 ────────────────────────────────────────────
+    # dp[i][j] = True 表示 path_parts[:i] 已被 pat_parts[:j] 完全匹配
+    n, m = len(path_parts), len(pat_parts)
+    dp = [[False] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = True
+
+    # 模式开头连续的 ** 可以匹配空路径
+    for j in range(1, m + 1):
+      if pat_parts[j - 1] == '**':
+        dp[0][j] = dp[0][j - 1]
+      else:
+        break
+
+    for i in range(1, n + 1):
+      for j in range(1, m + 1):
+        seg = pat_parts[j - 1]
+        if seg == '**':
+          # ** 匹配零段（跳过该模式段）或多段（消耗一个路径段）
+          dp[i][j] = dp[i][j - 1] or dp[i - 1][j]
+        else:
+          # 单段匹配：使用 fnmatch 处理 * 和 ?
+          if dp[i - 1][j - 1] and fnmatch.fnmatch(path_parts[i - 1], seg):
+            dp[i][j] = True
+
+    return dp[n][m]
 
   def _record_permission_change(self, change_type: str, items: List[str] | Dict):
     """记录权限变更历史"""

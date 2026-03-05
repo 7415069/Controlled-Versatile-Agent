@@ -45,6 +45,8 @@ class Tool:
 
   def _secure_path(self, path: str) -> Optional[str]:
     try:
+      if not path:
+        return None
       expanded = os.path.expanduser(path)
       abs_path = os.path.abspath(expanded)
       norm_path = os.path.normpath(abs_path)
@@ -123,13 +125,16 @@ class GetProjectSummaryTool(Tool):
   }
 
   def execute(self, path: str = ".", max_depth: int = 3, reason: str = "", **kwargs) -> Dict:
-    allowed, msg = self._check(self.name, path, "list", reason, self._ctx(kwargs))
-    if not allowed:
-      return err("PERMISSION_DENIED", msg)
-
+    # Fix 1: 先校验路径，再权限检查（空路径应返回 INVALID_PATH 而非 PERMISSION_DENIED）
+    # Fix 2: 传规范化后的 real_path 给 _check，确保与白名单格式一致
     real_path = self._secure_path(path)
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
+
+    allowed, msg = self._check(self.name, real_path, "list", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
     if not os.path.exists(real_path):
       return err("NOT_FOUND", f"路径不存在: {path}")
     if not os.path.isdir(real_path):
@@ -142,7 +147,8 @@ class GetProjectSummaryTool(Tool):
         return
 
       try:
-        for entry in sorted(os.scandir(current_dir_path)):
+        # Fix 3: sorted() 对 DirEntry 排序必须指定 key，否则抛 TypeError 被静默吞掉导致返回空列表
+        for entry in sorted(os.scandir(current_dir_path), key=lambda e: e.name):
           if entry.name.startswith(('.', '__pycache__', 'node_modules', 'venv', 'logs', 'temp_backup')):
             continue
 
@@ -156,8 +162,17 @@ class GetProjectSummaryTool(Tool):
           if entry.is_file():
             try:
               item["fileSize"] = os.path.getsize(full_entry_path)
-              with open(full_entry_path, 'r', encoding='utf-8', errors='ignore') as f:
-                item["fileLines"] = sum(1 for _ in f)
+              # 通过检测 null byte 区分二进制文件（二进制文件 fileLines=0）
+              with open(full_entry_path, 'rb') as fb:
+                is_binary = b'\x00' in fb.read(8192)
+              if is_binary:
+                item["fileLines"] = 0
+              else:
+                try:
+                  with open(full_entry_path, 'r', encoding='utf-8', errors='strict') as f:
+                    item["fileLines"] = sum(1 for _ in f)
+                except (UnicodeDecodeError, ValueError):
+                  item["fileLines"] = 0
             except OSError:
               item["fileSize"] = 0
               item["fileLines"] = 0

@@ -4,7 +4,8 @@ GetProjectSummaryTool 的单元测试
 验证工具的更名、新增文件摘要属性 (fileSize, fileLines) 以及深度限制等功能。
 """
 
-import fnmatch  # <-- New import for robust pattern matching
+import fnmatch
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -16,36 +17,93 @@ sys.path.insert(0, str(project_root))
 from core.tool import GetProjectSummaryTool
 
 
-# Removed explicit import of PermissionChecker, as MockPermissionChecker is used
-
-
-# Mock for PermissionChecker - REVISED
+# Mock for PermissionChecker - FINAL, ROBUST REVISION
 class MockPermissionChecker:
   def __init__(self, allowed_patterns=None, denied_patterns=None):
-    # Default to allowing all if no specific patterns are given, for convenience in tests.
-    self.allowed_patterns = allowed_patterns if allowed_patterns is not None else ["*"]
-    self.denied_patterns = denied_patterns if denied_patterns is not None else []
+    # Helper to normalize patterns for consistent matching.
+    # This mimics the normalization part of _secure_normalize from core.permissions.
+    # It's crucial that the patterns passed here are eventually compared against
+    # paths normalized in a similar way.
+    def _normalize_pattern_for_mock(p_raw: str) -> str:
+      if p_raw == "*":
+        return "*"
+      # Expand user, abspath, normpath, then to POSIX string for fnmatch consistency on all OS.
+      # This step should NOT fail for null bytes if it's just a pattern, only for actual target paths.
+      try:
+        return Path(os.path.normpath(os.path.abspath(os.path.expanduser(p_raw)))).as_posix()
+      except (ValueError, OSError):
+        # If a pattern itself is malformed (e.g., contains null byte), it's invalid.
+        # However, for simplicity in a mock, we'll return it as is or raise a specific error if needed.
+        # For now, let's just return the raw pattern if normalization fails.
+        return p_raw
+
+    self.allowed_patterns_normalized = [_normalize_pattern_for_mock(p) for p in (allowed_patterns if allowed_patterns is not None else ["*"])]
+    self.denied_patterns_normalized = [_normalize_pattern_for_mock(p) for p in (denied_patterns if denied_patterns is not None else [])]
     self.audit_log = []
 
-  def check(self, tool_name, target, permission_type, reason, context):
-    # This mock's responsibility is *only* to simulate the permission *policy* check.
-    # The tool's own _secure_path (from core.tool.Tool) is responsible for handling
-    # 'unsafe' characters like \x00 or path traversal attempts.
+  def _matches_pattern_robust(self, target_path_raw: str, pattern_str_normalized: str) -> bool:
+    """
+    Robust pattern matching logic mimicking core.permissions.PermissionChecker._match_path.
+    This handles direct matches, directory prefix matches for glob patterns, and fnmatch.
+    It explicitly avoids Path().resolve() on target_path_raw to prevent ValueError for null bytes,
+    instead using os.path.normpath and os.path.abspath.
+    """
+    if not target_path_raw:  # An empty target cannot match any non-wildcard pattern
+      return False
 
-    # 1. Check explicit denials first (more specific patterns should take precedence)
-    for p in self.denied_patterns:
-      if fnmatch.fnmatch(target, p):
-        self.audit_log.append({"tool": tool_name, "target": target, "type": permission_type, "status": "denied"})
+    # Normalize the target path similar to how patterns are normalized in _secure_normalize.
+    # This is where potential null byte errors for the *target* path would be caught by the *tool's* _secure_path,
+    # but the mock itself should handle it gracefully for matching purposes.
+    try:
+      target_path_normalized = Path(os.path.normpath(os.path.abspath(os.path.expanduser(target_path_raw)))).as_posix()
+    except (ValueError, OSError):
+      # If target_path_raw contains invalid characters (like null byte),
+      # it should not match any valid pattern.
+      return False
+
+    # Handle "*" wildcard pattern
+    if pattern_str_normalized == "*":
+      return True
+
+    # 1. Exact match
+    if target_path_normalized == pattern_str_normalized:
+      return True
+
+    # 2. Directory prefix matching for glob patterns (AntPath style: /path/** matching /path or /path/subdir)
+    # Get the base directory part of the pattern, stripping any glob characters.
+    base_pattern_dir = pattern_str_normalized.rstrip('*').rstrip('/')  # Use '/' for POSIX path
+
+    if base_pattern_dir:  # Only proceed if there's a non-empty base directory in pattern
+      # If the target is the exact base directory of the pattern (e.g., target="/a", pattern="/a/**")
+      if target_path_normalized == base_pattern_dir:
+        return True
+
+      # If the target starts with the base directory of the pattern, followed by a separator
+      # (e.g., target="/a/b", pattern="/a/**")
+      if target_path_normalized.startswith(base_pattern_dir + '/'):  # Use '/' for POSIX path
+        return True
+
+    # 3. Fallback to standard fnmatch for other cases (e.g., specific file globs like *.py)
+    if fnmatch.fnmatch(target_path_normalized, pattern_str_normalized):
+      return True
+
+    return False
+
+  def check(self, tool_name: str, target: str, permission_type: str, reason: str, context: str) -> tuple[bool, str]:
+    # Log the check attempt.
+    self.audit_log.append({"tool": tool_name, "target": target, "type": permission_type})
+
+    # 1. Check explicit denials first
+    for p in self.denied_patterns_normalized:  # Use normalized patterns
+      if self._matches_pattern_robust(target, p):
         return False, f"Denied by mock policy for pattern: {p}"
 
     # 2. Check explicit allowances
-    for p in self.allowed_patterns:
-      if fnmatch.fnmatch(target, p):
-        self.audit_log.append({"tool": tool_name, "target": target, "type": permission_type, "status": "approved"})
-        return True, None
+    for p in self.allowed_patterns_normalized:  # Use normalized patterns
+      if self._matches_pattern_robust(target, p):
+        return True, None  # Return None for message on success
 
     # 3. Default deny if no explicit allow or deny rule matched
-    self.audit_log.append({"tool": tool_name, "target": target, "type": permission_type, "status": "default_denied"})
     return False, "Not explicitly allowed by mock policy."
 
 
@@ -70,7 +128,7 @@ def test_get_project_summary_basic():
     create_dummy_project_structure(temp_path)
 
     # Allow all paths within the temp_path
-    mock_checker = MockPermissionChecker(allowed_patterns=[str(temp_path) + "/**"])
+    mock_checker = MockPermissionChecker(allowed_patterns=[f"{temp_path}/**"])
     tool = GetProjectSummaryTool(mock_checker.check)
 
     result = tool.execute(path=str(temp_path), max_depth=2, reason="test")
@@ -135,7 +193,7 @@ def test_get_project_summary_depth_limit():
     (temp_path / "level1" / "level2" / "level3").mkdir()
     (temp_path / "level1" / "level2" / "level3" / "file3.txt").write_text("3")
 
-    mock_checker = MockPermissionChecker(allowed_patterns=[str(temp_path) + "/**"])
+    mock_checker = MockPermissionChecker(allowed_patterns=[f"{temp_path}/**"])
     tool = GetProjectSummaryTool(mock_checker.check)
 
     # max_depth=0: only current dir contents
@@ -150,16 +208,20 @@ def test_get_project_summary_depth_limit():
     result_1 = tool.execute(path=str(temp_path), max_depth=1)
     assert result_1["status"] == "ok", f"Depth 1: {result_1.get('message')}"
     names_1 = sorted([item["name"] for item in result_1["data"]["summary_items"]])
-    expected_names_1 = ["file1.txt", "level1", "level2"]
-    assert names_1 == expected_names_1, f"max_depth=1 failed. Expected: {expected_names_1}, Got: {names_1}"
+
+    expected_names_1 = {"level1", "file1.txt", "level2"}  # Use set for easier comparison
+    assert expected_names_1.issubset(names_1), f"max_depth=1 failed. Missing items. Expected: {expected_names_1}, Got: {names_1}"
+    assert len(names_1) == len(expected_names_1)
     print(f"✅ Depth 1 correct: {names_1}")
 
     # max_depth=2: current dir contents + two levels down
     result_2 = tool.execute(path=str(temp_path), max_depth=2)
     assert result_2["status"] == "ok", f"Depth 2: {result_2.get('message')}"
     names_2 = sorted([item["name"] for item in result_2["data"]["summary_items"]])
-    expected_names_2 = ["file1.txt", "file2.txt", "level1", "level2", "level3"]
-    assert names_2 == expected_names_2, f"max_depth=2 failed. Expected: {expected_names_2}, Got: {names_2}"
+
+    expected_names_2 = {"level1", "file1.txt", "level2", "file2.txt", "level3"}
+    assert expected_names_2.issubset(names_2), f"max_depth=2 failed. Missing items. Expected: {expected_names_2}, Got: {names_2}"
+    assert len(names_2) == len(expected_names_2)
     print(f"✅ Depth 2 correct: {names_2}")
 
     print("✅ Depth limit test passed.")
@@ -172,14 +234,15 @@ def test_get_project_summary_permission_denied_by_mock():
     create_dummy_project_structure(temp_path)
 
     # Mock checker denies access to temp_path
-    mock_checker = MockPermissionChecker(allowed_patterns=[], denied_patterns=[str(temp_path) + "/**"])
+    mock_checker = MockPermissionChecker(allowed_patterns=[], denied_patterns=[f"{temp_path}/**"])
     tool = GetProjectSummaryTool(mock_checker.check)
 
     result = tool.execute(path=str(temp_path), max_depth=2, reason="test")
 
     assert result["status"] == "error"
     assert result["error_code"] == "PERMISSION_DENIED"
-    assert "Denied by mock policy" in result["message"]
+    # The message should match exactly what the mock returns for a denied pattern.
+    assert f"Denied by mock policy for pattern: {Path(temp_path).as_posix()}/**" == result["message"]  # Using as_posix() here too
     print("✅ Permission denied by mock checker test passed.")
 
 
@@ -195,12 +258,14 @@ def test_get_project_summary_invalid_path():
   print("✅ Non-existent path test passed (handled by tool).")
 
   # Path is unsafe (contains null byte) - this should be caught by tool's _secure_path
-  result_unsafe_null = tool.execute(path="path\x00with\x00null", reason="test")
+  result_unsafe_null = tool.execute(path="path\x00with\x00null", reason="test")  # Path with null byte, _secure_path should return None
   assert result_unsafe_null["status"] == "error"
   assert result_unsafe_null["error_code"] == "INVALID_PATH"
   assert "不安全或无效" in result_unsafe_null["message"]
   print("✅ Unsafe path (null byte) test passed (handled by tool).")
 
+  # Test with a path that's a file but exists (e.g., /etc/passwd).
+  # Tool itself should detect it's not a directory.
   if Path("/etc/passwd").exists():
     result_file_not_dir = tool.execute(path="/etc/passwd", reason="test")
     assert result_file_not_dir["status"] == "error"
@@ -216,7 +281,7 @@ def test_get_project_summary_not_a_directory():
     temp_path = Path(temp_dir)
     (temp_path / "file.txt").write_text("content")
 
-    mock_checker = MockPermissionChecker(allowed_patterns=[str(temp_path) + "/**"])
+    mock_checker = MockPermissionChecker(allowed_patterns=[f"{temp_path}/**"])
     tool = GetProjectSummaryTool(mock_checker.check)
 
     result = tool.execute(path=str(temp_path / "file.txt"), reason="test")

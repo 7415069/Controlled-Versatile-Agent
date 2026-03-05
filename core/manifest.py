@@ -37,7 +37,7 @@ class RoleManifest:
   # 全量合法 capability 集合
   VALID_CAPABILITIES = {
     "find_symbol",
-    "get_project_tree",
+    "get_project_summary",
     "get_file_skeleton",
     "list_directory",
     "read_file",
