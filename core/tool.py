@@ -314,6 +314,9 @@ class ReadFileTool(Tool):
     "required": ["path", "reason"],
   }
 
+  MAX_PHYSICAL_FILE_SIZE = 100 * 1024 * 1024
+  MAX_RETURNED_CONTENT_CHARS = 30000
+
   def execute(self, path: str, start_line: int = 1, end_line: Optional[int] = None,
       encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
@@ -325,23 +328,22 @@ class ReadFileTool(Tool):
       return err("NOT_FOUND", "文件不存在")
 
     try:
-      # 为了安全，我们还是需要检查文件物理大小，防止内存溢出
-      if os.path.getsize(real_path) > 100 * 1024 * 1024:
-        return err("FILE_TOO_LARGE", "文件超过100MB，请先用搜索或大纲工具查看")
+      if os.path.getsize(real_path) > self.MAX_PHYSICAL_FILE_SIZE:
+        return err("FILE_TOO_LARGE", f"文件超过 {self.MAX_PHYSICAL_FILE_SIZE / (1024 * 1024)}MB，请先用搜索或大纲工具查看")
 
       with open(real_path, "r", encoding=encoding, errors="replace") as f:
-        # 优化：如果是大文件且只需要读几行，不要用 readlines()
-        # 这里为了简单先用这个，对于 10MB 以下文件没问题
         lines = f.readlines()
 
       total_lines = len(lines)
       effective_end = end_line if end_line else total_lines
 
-      # 边界修正
       start_idx = max(0, start_line - 1)
       end_idx = min(total_lines, effective_end)
 
       content = "".join(lines[start_idx:end_idx])
+
+      if len(content) > self.MAX_RETURNED_CONTENT_CHARS:
+        content = content[:self.MAX_RETURNED_CONTENT_CHARS] + f"\n... (内容已截断，共 {len(content)} 字符，仅返回前 {self.MAX_RETURNED_CONTENT_CHARS} 字符以节省Token)"
 
       return ok({
         "artifact_type": "file_content",
@@ -349,7 +351,7 @@ class ReadFileTool(Tool):
           "path": real_path,
           "range": f"{start_idx + 1}-{end_idx}",
           "total_lines": total_lines,
-          "is_full_text": (start_idx == 0 and end_idx == total_lines)
+          "is_full_text": (start_idx == 0 and end_idx == total_lines) and (len(content) <= self.MAX_RETURNED_CONTENT_CHARS),
         },
         "content": content,
         "can_dehydrate": True
@@ -810,8 +812,8 @@ class ExecutePythonTool(Tool):
 
 TOOL_REGISTRY = {
   "find_symbol": FindSymbolTool,
-  "get_project_summary": GetProjectSummaryTool,  # 注册
-  "get_file_skeleton": GetFileSkeletonTool,  # 注册
+  "get_project_summary": GetProjectSummaryTool,
+  "get_file_skeleton": GetFileSkeletonTool,
   "list_directory": ListDirectoryTool,
   "read_file": ReadFileTool,
   "backup_file": BackupFileTool,
