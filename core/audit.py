@@ -137,35 +137,3 @@ class AuditLogger:
     except Exception as e:
       print(f"[AuditLogger] ⚠️  清理日志失败: {e}")
 
-  def get_log_stats(self) -> Dict[str, Any]:
-    """获取日志统计信息"""
-    try:
-      total_files = 0
-      total_size = 0
-      oldest_log = None
-      newest_log = None
-      
-      for filename in os.listdir(self._log_dir):
-        if not filename.startswith("cva-audit-"):
-          continue
-        
-        filepath = os.path.join(self._log_dir, filename)
-        total_files += 1
-        total_size += os.path.getsize(filepath)
-        
-        file_mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
-        if oldest_log is None or file_mtime < oldest_log:
-          oldest_log = file_mtime
-        if newest_log is None or file_mtime > newest_log:
-          newest_log = file_mtime
-      
-      return {
-        "total_files": total_files,
-        "total_size_bytes": total_size,
-        "total_size_mb": round(total_size / (1024 * 1024), 2),
-        "oldest_log": oldest_log.isoformat() if oldest_log else None,
-        "newest_log": newest_log.isoformat() if newest_log else None,
-      }
-    
-    except Exception as e:
-      return {"error": str(e)}

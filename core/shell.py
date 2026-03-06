@@ -264,27 +264,12 @@ class UniversalShell:
     sys.stdout.write(prompt)
     sys.stdout.flush()
 
-    # 智能判断是文本流还是字节流
     if hasattr(sys.stdin, 'buffer') and hasattr(sys.stdin.buffer, 'readline'):
-      # 如果有 buffer 属性且可读，认为是字节流
       line = sys.stdin.buffer.readline()
-      try:
-        return line.decode('utf-8').strip()
-      except UnicodeDecodeError:
-        return line.decode('gbk', errors='replace').strip()
+      decoded = line.decode('utf-8').strip()
+      return decoded
     else:
-      # 否则直接从文本流读取字符串
       return sys.stdin.readline().strip()
-
-  # def _safe_input(self, prompt: str) -> str:
-  #   try:
-  #     return input(prompt).strip()
-  #   except UnicodeDecodeError:
-  #     print("\n[系统] 输入包含非标准字符，尝试自动修复...")
-  #     raw_data = sys.stdin.buffer.readline()
-  #     return raw_data.decode(sys.stdin.encoding or 'utf-8', errors='replace').strip()
-  #   except EOFError:
-  #     return ""
 
   def _visual_len(self, text: str) -> int:
     """计算字符串的视觉宽度"""

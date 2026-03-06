@@ -251,11 +251,6 @@ class EscalationManager:
           "expired_at": record.expires_at
         })
 
-  def get_approval_history(self) -> List[ApprovalRecord]:
-    """获取审批历史"""
-    with self._lock:
-      return list(self._approval_history)
-
   def _llm_pre_screen(self, req: EscalationRequest) -> PreScreenResult:
     if not self._llm_call:
       return PreScreenResult(is_necessary=True, reasoning="二次确认不可用。")

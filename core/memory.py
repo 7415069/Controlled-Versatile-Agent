@@ -78,18 +78,6 @@ class TaskState:
     # 重置已完成步骤（新计划覆盖旧计划）
     self.completed_steps = []
 
-  def mark_step_done(self, step_description: str):
-    """标记一个步骤完成，自动推进 active_step"""
-    if self.active_step and self.active_step not in self.completed_steps:
-      self.completed_steps.append(self.active_step)
-
-    # 推进到下一个未完成的步骤
-    for step in self.plan:
-      if step not in self.completed_steps:
-        self.active_step = step
-        return
-    self.active_step = ""  # 所有步骤完成
-
   def add_knowledge(self, key: str, value: str):
     """记录发现的关键事实"""
     self.discovered_knowledge[key] = value
@@ -106,36 +94,6 @@ class TaskState:
 
     lines = [
       "---",
-      "### 📋 当前任务状态 (TaskState)",
-      f"**目标**: {self.current_goal}",
-    ]
-
-    if self.plan:
-      plan_lines = []
-      for step in self.plan:
-        if step in self.completed_steps:
-          plan_lines.append(f"  - [x] {step}")
-        elif step == self.active_step:
-          plan_lines.append(f"  - [→] **{step}** ← 当前步骤")
-        else:
-          plan_lines.append(f"  - [ ] {step}")
-      lines.append("**计划**:\n" + "\n".join(plan_lines))
-
-    if self.discovered_knowledge:
-      kv = "; ".join(f"{k}: {v}" for k, v in list(self.discovered_knowledge.items())[-5:])
-      lines.append(f"**已知事实**: {kv}")
-
-    if self.pending_risks:
-      lines.append(f"**待处理风险**: {'; '.join(self.pending_risks[-3:])}")
-
-    progress = f"{len(self.completed_steps)}/{len(self.plan)}"
-    lines.append(f"**进度**: {progress} 步骤完成")
-    lines.append("---")
-    return "\n".join(lines)
-
-
-# ─── 核心类 ───────────────────────────────────────────────────
-
 class MemoryStore:
   """
   跨 session 持久化对话历史。
@@ -323,16 +281,6 @@ class MemoryStore:
         if duration > 0.5:  # 超过500ms记录警告
           print(f"[Memory] ⚠️  extend操作耗时: {duration:.3f}s")
 
-  def flush(self):
-    """强制刷盘"""
-    with self._file_lock:
-      if self._file and not self._file.closed:
-        try:
-          self._file.flush()
-          os.fsync(self._file.fileno())
-        except Exception as e:
-          print(f"[Memory] ⚠️  刷盘失败: {e}")
-
   def close(self):
     """关闭内存存储，释放资源"""
     self._cleanup_resources()
@@ -386,6 +334,38 @@ class MemoryStore:
     active_boundary = total_len - (keep_last_n * 3)  # 活跃区范围扩大，避免切断工具链
     result = []
 
+    # 预处理：建立 tool_call_id → assistant消息索引，用于成对操作
+    # key: tool_call_id, value: assistant消息在raw_msgs中的index
+    tool_call_owner: Dict[str, int] = {}
+    for i, msg in enumerate(raw_msgs):
+      if msg.get("role") == "assistant":
+        for tc in msg.get("tool_calls", []):
+          if isinstance(tc, dict):
+            tc_id = tc.get("id", "")
+            if tc_id:
+              tool_call_owner[tc_id] = i
+
+    # 找出所有需要跳过的索引（NOISE成对跳过）
+    skip_indices = set()
+    for i, msg in enumerate(raw_msgs):
+      tag = msg.get("_importance", "PROCESS")
+      role = msg.get("role", "")
+      if tag == "NOISE":
+        skip_indices.add(i)
+        # 如果是tool消息，同时跳过对应的assistant消息
+        if role == "tool":
+          tc_id = msg.get("tool_call_id", "")
+          if tc_id and tc_id in tool_call_owner:
+            skip_indices.add(tool_call_owner[tc_id])
+        # 如果是assistant消息（含tool_calls），同时跳过所有对应的tool消息
+        if role == "assistant":
+          for tc in msg.get("tool_calls", []):
+            if isinstance(tc, dict):
+              tc_id = tc.get("id", "")
+              for j, other in enumerate(raw_msgs):
+                if other.get("role") == "tool" and other.get("tool_call_id") == tc_id:
+                  skip_indices.add(j)
+
     for i, msg in enumerate(raw_msgs):
       tag = msg.get("_importance", "PROCESS")
       role = msg.get("role", "")
@@ -396,8 +376,8 @@ class MemoryStore:
         result.append(clean)
         continue
 
-      # ─── NOISE：直接丢弃 ───
-      if tag == "NOISE":
+      # ─── NOISE：成对跳过 ───
+      if i in skip_indices:
         continue
 
       # ─── DECISION：保留摘要 ───
@@ -536,11 +516,6 @@ class MemoryStore:
         raw["sessions"] = [s for s in raw["sessions"] if s["session_id"] != session_id]
         with open(index_path, "w", encoding="utf-8") as f:
           json.dump(raw, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-      print(f"[Memory] ⚠️  删除session失败: {e}")
-
-  # ─── 私有方法 ─────────────────────────────────────────────
-
   def _open_file(self):
     """安全地打开文件句柄"""
     with self._file_lock:
@@ -768,15 +743,14 @@ class MemoryStore:
       tagged["_importance"] = "NOISE"
       return tagged
 
-    # 2. tool 消息：重复的目录列表（内容含 list_directory 特征且已有更新的同类消息）
+    # 2. tool 消息：重复的目录列表
+    # 注意：tool消息不能单独标NOISE，必须和对应的assistant tool_call一起处理
+    # 这里只标记，实际丢弃在 prepare_for_llm 和 _maybe_trim 中成对处理
     if role == "tool":
       try:
         data = json.loads(content_str)
         inner_data = data.get("data", {})
-        if "summary_items" in inner_data or (
-            "entries" in inner_data and len(str(inner_data)) < 500
-        ):
-          # 短小的目录列表结果标记为 NOISE
+        if "entries" in inner_data and "summary_items" not in inner_data and len(str(inner_data)) < 500:
           tagged["_importance"] = "NOISE"
           return tagged
       except (json.JSONDecodeError, AttributeError):
@@ -802,6 +776,39 @@ class MemoryStore:
     tagged["_importance"] = "PROCESS"
     return tagged
 
+  def _group_remove(self, messages: List[Dict], indices_to_remove: set) -> List[Dict]:
+    """
+    成对删除消息：删除某条消息时，自动将其配对消息也加入删除集合。
+    - 删除tool消息 → 同时删除对应assistant的tool_call消息
+    - 删除assistant消息(含tool_calls) → 同时删除所有对应tool消息
+    """
+    # 建立 tool_call_id → assistant索引 和 tool_call_id → tool消息索引
+    tool_call_owner: Dict[str, int] = {}
+    tool_result_index: Dict[str, int] = {}
+    for i, msg in enumerate(messages):
+      if msg.get("role") == "assistant":
+        for tc in msg.get("tool_calls", []):
+          if isinstance(tc, dict) and tc.get("id"):
+            tool_call_owner[tc["id"]] = i
+      if msg.get("role") == "tool" and msg.get("tool_call_id"):
+        tool_result_index[msg["tool_call_id"]] = i
+
+    # 扩展删除集合，确保成对
+    expanded = set(indices_to_remove)
+    for idx in list(indices_to_remove):
+      msg = messages[idx]
+      role = msg.get("role", "")
+      if role == "tool":
+        tc_id = msg.get("tool_call_id", "")
+        if tc_id and tc_id in tool_call_owner:
+          expanded.add(tool_call_owner[tc_id])
+      if role == "assistant":
+        for tc in msg.get("tool_calls", []):
+          if isinstance(tc, dict) and tc.get("id") in tool_result_index:
+            expanded.add(tool_result_index[tc["id"]])
+
+    return [m for i, m in enumerate(messages) if i not in expanded]
+
   def _maybe_trim(self):
     """增强版截断：先检查增量 token 估算，触发时按重要性裁剪"""
     if (len(self._messages) <= self._max_messages and
@@ -819,8 +826,9 @@ class MemoryStore:
     # 按重要性裁剪：优先丢弃 NOISE，再丢弃 PROCESS，保留 ANCHOR 和 DECISION
     original_count = len(self._messages)
 
-    # 第一步：丢弃所有 NOISE
-    self._messages = [m for m in self._messages if m.get("_importance") != "NOISE"]
+    # 第一步：丢弃所有 NOISE（成对删除）
+    noise_indices = {i for i, m in enumerate(self._messages) if m.get("_importance") == "NOISE"}
+    self._messages = self._group_remove(self._messages, noise_indices)
 
     # 重新估算
     self._cached_token_estimate = sum(self._count_tokens_single(m) for m in self._messages)
@@ -835,10 +843,10 @@ class MemoryStore:
       i for i, m in enumerate(self._messages)
       if m.get("_importance") == "PROCESS"
     ]
-    # 保留后半段的 PROCESS，丢弃前半段
+    # 保留后半段的 PROCESS，丢弃前半段（成对删除）
     cutoff = len(process_indices) // 2
     indices_to_remove = set(process_indices[:cutoff])
-    self._messages = [m for i, m in enumerate(self._messages) if i not in indices_to_remove]
+    self._messages = self._group_remove(self._messages, indices_to_remove)
 
     self._cached_token_estimate = sum(self._count_tokens_single(m) for m in self._messages)
     self._last_token_calc_time = time.time()

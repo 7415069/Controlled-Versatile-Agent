@@ -257,27 +257,6 @@ class PermissionChecker:
         # 清除所有Shell权限缓存
         self._clear_cache_for_type("shell")
 
-  def revoke_all(self):
-    """撤销所有动态授权权限，恢复到初始状态（修复：不再清除初始权限）"""
-    with self._lock:
-      before_snapshot = self.snapshot()
-
-      # ─── 修复：恢复到初始权限，而不是清空所有 ───
-      self._list_patterns = list(self._init_list_patterns)
-      self._read_patterns = list(self._init_read_patterns)
-      self._write_patterns = list(self._init_write_patterns)
-      self._shell_prefixes = list(self._init_shell_prefixes)
-
-      # 清除所有缓存
-      self._permission_cache.clear()
-
-      self._record_permission_change("revoke_all", {
-        "before": before_snapshot,
-        "after": self.snapshot()
-      })
-
-  # ─── 当前白名单快照（用于审计日志）──────────────────────
-
   def snapshot(self) -> dict:
     """获取当前权限白名单快照"""
     with self._lock:
@@ -315,34 +294,6 @@ class PermissionChecker:
       # 策略：找到第一个含通配符的段，对其前缀规范化，再拼回通配符后缀
       parts = raw.replace('\\', '/').split('/')
       prefix_parts = []
-      wildcard_parts = []
-      hit_wildcard = False
-      for part in parts:
-        if hit_wildcard or '*' in part or '?' in part:
-          hit_wildcard = True
-          wildcard_parts.append(part)
-        else:
-          prefix_parts.append(part)
-
-      prefix = '/'.join(prefix_parts) if prefix_parts else '.'
-      try:
-        abs_prefix = os.path.abspath(os.path.expanduser(prefix))
-      except Exception:
-        continue
-
-      if wildcard_parts:
-        norm = abs_prefix + os.sep + os.sep.join(wildcard_parts)
-        norm = os.path.normpath(norm).replace('**', '\x00').replace('*', '\x00').replace('\x00', '*')
-        # normpath 会把 ** 压缩，需要还原；用占位符绕过
-        # 更稳健的方式：直接字符串拼接，不走 normpath
-        norm = abs_prefix + os.sep + os.sep.join(wildcard_parts)
-      else:
-        norm = abs_prefix
-
-      normalized.append(norm)
-
-    return normalized
-
   def _update_cache(self, key: str, value: bool):
     """更新缓存（LRU策略）"""
     # 如果缓存已满，删除最旧的条目
