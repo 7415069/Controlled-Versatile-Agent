@@ -229,11 +229,18 @@ class UniversalShell:
   def _safe_input(self, prompt: str) -> str:
     sys.stdout.write(prompt)
     sys.stdout.flush()
-    line = sys.stdin.buffer.readline()
-    try:
-      return line.decode('utf-8').strip()
-    except UnicodeDecodeError:
-      return line.decode('gbk', errors='replace').strip()
+
+    # 智能判断是文本流还是字节流
+    if hasattr(sys.stdin, 'buffer') and hasattr(sys.stdin.buffer, 'readline'):
+      # 如果有 buffer 属性且可读，认为是字节流
+      line = sys.stdin.buffer.readline()
+      try:
+        return line.decode('utf-8').strip()
+      except UnicodeDecodeError:
+        return line.decode('gbk', errors='replace').strip()
+    else:
+      # 否则直接从文本流读取字符串
+      return sys.stdin.readline().strip()
 
   # def _safe_input(self, prompt: str) -> str:
   #   try:

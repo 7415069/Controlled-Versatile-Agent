@@ -1,3 +1,2 @@
 #!/bin/bash
-
-repomix -o cv_agent.txt core/ tests/
+repomix core/ tests/ roles/ -o cv_agent.txt

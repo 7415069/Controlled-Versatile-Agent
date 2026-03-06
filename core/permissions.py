@@ -134,8 +134,28 @@ class PermissionChecker:
       return False
 
   def can_list(self, path: str) -> bool:
-    """list_directory 复用 read 白名单"""
-    return self.can_read(path)
+    """
+    list_directory 检查 list 白名单（重要修复：不再复用 read 白名单）
+    此方法现在直接针对 _list_patterns 进行权限匹配。
+    """
+    cache_key = f"list:{path}"
+    if cache_key in self._permission_cache:
+      self._cache_hits += 1
+      return self._permission_cache[cache_key]
+
+    self._cache_misses += 1
+    try:
+      normalized_path = self._secure_normalize(path)
+      if normalized_path is None:
+        result = False
+      else:
+        # **这里的核心修改：使用 self._list_patterns 进行匹配**
+        result = self._match_path(normalized_path, self._list_patterns)
+
+      self._update_cache(cache_key, result)
+      return result
+    except Exception:
+      return False
 
   # ─── 白名单扩展（人类批准后调用）─────────────────────────
 

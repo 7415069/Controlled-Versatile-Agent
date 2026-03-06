@@ -48,6 +48,7 @@ init_permissions:
     - "./tests/**"
     - "./docs/**"
     - "./agent_workspace/**"
+    - "."
   write:
     - "./core/**"
     - "./tests/**"
@@ -64,15 +65,19 @@ init_permissions:
 
 capabilities:
   - find_symbol
-  - get_project_tree
+  - get_project_summary
   - get_file_skeleton
   - list_directory
   - read_file
   - backup_file
   - write_file
+  - append_file
   - run_shell
   - ask_human
   - search_files
+  - http_request
+  - submit_plan
+  - execute_python
 
 escalation_policy:
   auto_deny_patterns:
