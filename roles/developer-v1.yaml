@@ -23,7 +23,6 @@ identity_prompt: |
 
 init_permissions:
   list:
-    - "./core"
     - "./core/**"
     - "./roles"
     - "./tests"
