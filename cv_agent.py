@@ -1,98 +1,229 @@
-#!/usr/bin/env python3
-"""
-受控百变智能体 (CVA) v2 — 主入口
-用法:
-  # 新建 session
-  python cva.py --manifest roles/code-reviewer-v1.yaml
-
-  # 恢复历史 session
-  python cva.py --manifest roles/code-reviewer-v1.yaml --session <session-id>
-
-  # 列出历史 sessions
-  python cva.py --manifest roles/code-reviewer-v1.yaml --list-sessions
-
-  # 切换模型（litellm 格式）
-  python cva.py --manifest roles/code-reviewer-v1.yaml --model gpt-4o
-  python cva.py --manifest roles/code-reviewer-v1.yaml --model ollama/qwen2.5:14b
-  python cva.py --manifest roles/code-reviewer-v1.yaml --model gemini/gemini-2.0-flash
-"""
-
-import argparse
+import queue
 import sys
-import textwrap
+import threading
+from tkinter import messagebox
 
-from dotenv import load_dotenv  # 新增
+import customtkinter as ctk
 
-load_dotenv()  # 新增，自动读取 .env 文件
-
-from core.manifest import load_manifest
-from core.memory import MemoryStore
 from core.shell import UniversalShell
 
+# --- 现代配色方案 (深色 IDE 风格) ---
+COLOR_BG = "#1A1B1E"  # 深色背景
+COLOR_SIDEBAR = "#25262B"  # 侧边栏稍亮
+COLOR_ACCENT = "#339AF0"  # 蓝色点缀
+COLOR_TEXT_MAIN = "#E9ECEF"  # 主文字色
+COLOR_TEXT_DIM = "#909296"  # 次要文字色
+COLOR_CODE_CYAN = "#9CDCFE"  # 代码淡蓝色
+COLOR_SYS_GREEN = "#6A9955"  # 系统日志绿色
 
-def main():
-  parser = argparse.ArgumentParser(
-      description="受控百变智能体 (CVA) v2 — Controlled Versatile Agent",
-      formatter_class=argparse.RawDescriptionHelpFormatter,
-      epilog=textwrap.dedent("""
-        模型示例（--model 参数，litellm 格式）:
-          claude-opus-4-5              Anthropic Claude（默认）
-          gpt-4o                       OpenAI GPT-4o
-          gemini/gemini-2.0-flash      Google Gemini
-          ollama/qwen2.5:14b           本地 Ollama
-          deepseek/deepseek-chat        DeepSeek
-          groq/llama3-70b-8192          Groq
-        """).strip()
-  )
-  parser.add_argument("--manifest", required=True, help="Role Manifest YAML 文件路径")
-  parser.add_argument("--model", default="claude-opus-4-5", help="LiteLLM 格式模型名（默认: claude-opus-4-5）")
-  parser.add_argument("--session", default=None, help="恢复指定 session ID 的历史对话")
-  parser.add_argument("--list-sessions", action="store_true", help="列出该角色的所有历史 sessions 后退出")
-  parser.add_argument("--memory-dir", default="./memory", help="记忆存储目录（默认: ./memory）")
-  parser.add_argument("--log-dir", default="./audit-logs", help="审计日志目录（默认: ./audit-logs）")
-  parser.add_argument("--max-iterations", type=int, default=100, help="最大推理轮次（默认: 100）")
-  parser.add_argument("--max-memory-messages", type=int, default=200, help="内存中最大消息条数（默认: 200）")
-  parser.add_argument("--max-token-budget", type=int, default=50000, help="触发上下文截断的 token 估算上限（默认: 50000）")
-  args = parser.parse_args()
+ctk.set_appearance_mode("dark")
 
-  # 加载 manifest（用于获取 role_name）
-  manifest = load_manifest(args.manifest)
 
-  # --list-sessions 模式
-  if args.list_sessions:
-    sessions = MemoryStore.list_sessions(args.memory_dir, manifest.role_name)
-    if not sessions:
-      print(f"角色 [{manifest.role_name}] 暂无历史 sessions。")
-    else:
-      print(f"\n角色 [{manifest.role_name}] 历史 Sessions（共 {len(sessions)} 个）:")
-      print("─" * 80)
-      for s in sessions:
-        print(f"  ID      : {s.session_id}")
-        print(f"  消息数  : {s.message_count}")
-        print(f"  更新时间: {s.updated_at}")
-        print(f"  摘要    : {s.summary or '（无）'}")
-        print("─" * 80)
-    sys.exit(0)
+class CvaUltraGui:
+  def __init__(self, root):
+    self.root = root
+    self.root.title("CVA v2 | 系统架构师控制台")
+    self.root.geometry("1150x800")
+    self.root.configure(fg_color=COLOR_BG)
 
-  # 正常启动
-  shell = UniversalShell(
-      manifest_path=args.manifest,
-      model=args.model,
-      log_dir=args.log_dir,
-      memory_dir=args.memory_dir,
-      session_id=args.session,
-      max_iterations=args.max_iterations,
-      max_memory_messages=args.max_memory_messages,
-      max_token_budget=args.max_token_budget,
-  )
+    self.msg_queue = queue.Queue()
+    self.input_event = threading.Event()
+    self.user_input_value = ""
 
-  try:
-    shell.start()
-  except KeyboardInterrupt:
-    print("\n\n[CVA] 收到中断信号，优雅退出...")
-    shell.stop("keyboard_interrupt")
-    sys.exit(0)
+    # --- 1. 字体精细化初始化 ---
+    # 自动识别系统平台，选择最佳字体
+    if sys.platform == "win32":
+      self.font_family_ui = "Microsoft YaHei"
+      self.font_family_mono = "Monospace"
+    elif sys.platform == "darwin":  # macOS
+      self.font_family_ui = "PingFang SC"
+      self.font_family_mono = "Menlo"
+    else:  # Linux
+      self.font_family_ui = "Sans Serif"
+      self.font_family_mono = "Monospace"
+
+    # 定义几种常用的字体对象
+    self.font_ui_large = (self.font_family_ui, 11)
+    self.font_ui_normal = (self.font_family_ui, 10)
+    self.font_ui_bold = (self.font_family_ui, 10, "bold")
+    self.font_ui_small = (self.font_family_ui, 9)
+    self.font_mono = (self.font_family_mono, 9)
+
+    # 布局配置
+    self.root.grid_columnconfigure(1, weight=1)
+    self.root.grid_rowconfigure(0, weight=1)
+
+    self._setup_sidebar()
+    self._setup_main_chat()
+
+    # 启动队列监听循环
+    self.root.after(100, self._process_queue)
+
+  def _setup_sidebar(self):
+    """侧边栏布局：统一使用无衬线现代字体"""
+    self.sidebar_frame = ctk.CTkFrame(self.root, width=280, corner_radius=0, fg_color=COLOR_SIDEBAR, border_width=0)
+    self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+    self.sidebar_frame.grid_rowconfigure(10, weight=1)
+
+    # Logo 部分
+    self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="CVA SYSTEM", font=ctk.CTkFont(family=self.font_family_ui, size=24, weight="bold"), text_color=COLOR_ACCENT)
+    self.logo_label.grid(row=0, column=0, padx=30, pady=(40, 30))
+
+    # 参数区域
+    self._create_label(self.sidebar_frame, "配置文件 (YAML)", 1)
+    self.manifest_entry = self._create_entry(self.sidebar_frame, "roles/developer-v1.yaml", 2)
+
+    self._create_label(self.sidebar_frame, "智能底座 (LiteLLM)", 3)
+    self.model_entry = self._create_entry(self.sidebar_frame, "deepseek/deepseek-chat", 4)
+
+    # 启动按钮
+    self.start_btn = ctk.CTkButton(self.sidebar_frame, text="启动系统", height=45, font=ctk.CTkFont(family=self.font_family_mono, size=16, weight="bold"), fg_color=COLOR_ACCENT, hover_color="#228BE6", command=self._start_agent_thread)
+    self.start_btn.grid(row=5, column=0, padx=30, pady=30)
+
+    # 底部状态
+    self.status_dot = ctk.CTkLabel(self.sidebar_frame, text="●", text_color="#FA5252", font=(self.font_ui_normal, 16))
+    self.status_dot.grid(row=11, column=0, padx=(30, 0), pady=20, sticky="w")
+    self.status_label = ctk.CTkLabel(self.sidebar_frame, text="系统脱机", text_color=COLOR_TEXT_DIM, font=(self.font_family_mono, 16))
+    self.status_label.grid(row=11, column=0, padx=(50, 20), pady=20, sticky="w")
+
+  def _create_label(self, parent, text, row):
+    label = ctk.CTkLabel(parent, text=text, font=(self.font_family_mono, 16), text_color=COLOR_TEXT_DIM)
+    label.grid(row=row, column=0, padx=30, pady=(15, 0), sticky="w")
+
+  def _create_entry(self, parent, placeholder, row):
+    entry = ctk.CTkEntry(parent, placeholder_text=placeholder, width=220, height=38, fg_color="#1A1B1E", border_color="#373A40", border_width=1, font=(self.font_ui_normal, 16))
+    entry.insert(0, placeholder)
+    entry.grid(row=row, column=0, padx=30, pady=(5, 10))
+    return entry
+
+  def _setup_main_chat(self):
+    """右侧主界面：混合字体对话显示"""
+    self.main_frame = ctk.CTkFrame(self.root, fg_color=COLOR_BG)
+    self.main_frame.grid(row=0, column=1, padx=30, pady=30, sticky="nsew")
+    self.main_frame.grid_rowconfigure(0, weight=1)
+    self.main_frame.grid_columnconfigure(0, weight=1)
+
+    # 对话显示区
+    self.chat_display = ctk.CTkTextbox(self.main_frame, corner_radius=15, fg_color=COLOR_SIDEBAR, border_width=1, border_color="#373A40", text_color="#C1C2C5")
+    self.chat_display.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0, 25))
+
+    # --- 配置多样式标签 ---
+    # body: 正常的对话，用无衬线体
+    self.chat_display._textbox.tag_config("body", font=self.font_ui_normal, spacing1=8, spacing3=8)
+    # code: 工具调用和JSON，用等宽体
+    self.chat_display._textbox.tag_config("code", font=self.font_mono, foreground=COLOR_CODE_CYAN, spacing1=2, spacing3=2)
+    # system: 内存和Session提示，用淡色等宽体
+    self.chat_display._textbox.tag_config("system", font=self.font_mono, foreground=COLOR_SYS_GREEN)
+    # user: 用户自己的话，加粗
+    self.chat_display._textbox.tag_config("user", font=self.font_ui_bold, foreground=COLOR_ACCENT)
+
+    self.chat_display.configure(state="disabled")
+
+    # 底部输入区
+    self.input_container = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+    self.input_container.grid(row=1, column=0, sticky="ew")
+    self.input_container.grid_columnconfigure(0, weight=1)
+
+    self.input_field = ctk.CTkEntry(self.input_container, placeholder_text="向 Agent 发送指令...", height=50, font=ctk.CTkFont(family=self.font_family_ui, size=16), fg_color=COLOR_SIDEBAR, border_color="#373A40", border_width=1, corner_radius=10)
+    self.input_field.grid(row=0, column=0, sticky="ew", padx=(0, 15))
+    self.input_field.bind("<Return>", lambda e: self._on_send())
+
+    self.send_btn = ctk.CTkButton(self.input_container, text="发送", width=110, height=50, fg_color=COLOR_ACCENT, corner_radius=10, font=ctk.CTkFont(family=self.font_family_mono, size=16, weight="bold"), command=self._on_send)
+    self.send_btn.grid(row=0, column=1)
+
+  def _write_output(self, text):
+    """智能样式分类写入"""
+    self.chat_display.configure(state="normal")
+
+    lines = text.split('\n')
+    for line in lines:
+      stripped = line.strip()
+      if not stripped:
+        self.chat_display.insert("end", "\n")
+        continue
+
+      # 样式路由逻辑
+      if "👤 USER:" in line:
+        self.chat_display.insert("end", line + "\n", "user")
+      elif stripped.startswith("[") and ("]" in stripped):
+        self.chat_display.insert("end", line + "\n", "system")
+      elif any(sym in line for sym in ("🔧", "✔", "✖", "─", "🚀", "Command", ">", "    ", "{", "}")):
+        self.chat_display.insert("end", line + "\n", "code")
+      else:
+        self.chat_display.insert("end", line + "\n", "body")
+
+    self.chat_display.see("end")
+    self.chat_display.configure(state="disabled")
+
+  def _on_send(self):
+    content = self.input_field.get().strip()
+    if content:
+      self._write_output(f"\n👤 USER: {content}")
+      self.input_field.delete(0, "end")
+      self.user_input_value = content
+      self.input_event.set()
+
+  def _start_agent_thread(self):
+    manifest = self.manifest_entry.get().strip()
+    model_name = self.model_entry.get().strip()
+    if not manifest or not model_name:
+      messagebox.showwarning("参数缺失", "请检查配置文件路径和模型名称")
+      return
+
+    self.start_btn.configure(state="disabled", text="系统引导中...")
+    self.status_dot.configure(text_color="#40C057")  # 变绿（在线）
+    self.status_label.configure(text=f"在线: {model_name[:15]}...", text_color=COLOR_TEXT_MAIN)
+
+    thread = threading.Thread(target=self._run_agent, args=(manifest, model_name), daemon=True)
+    thread.start()
+
+  def _run_agent(self, manifest_path, model_name):
+    class GuiShell(UniversalShell):
+      def __init__(self, outer, *args, **kwargs):
+        self.outer = outer
+        super().__init__(*args, **kwargs)
+
+      def _safe_input(self, _prompt: str):
+        self.outer.msg_queue.put(('print', _prompt))
+        self.outer.input_event.wait()
+        val = self.outer.user_input_value
+        self.outer.input_event.clear()
+        return val
+
+    class StdoutRedirector:
+      def __init__(self, q):
+        self.q = q
+
+      def write(self, s):
+        if s.strip():
+          self.q.put(('print', s))
+
+      def flush(self):
+        pass
+
+    sys.stdout = StdoutRedirector(self.msg_queue)
+
+    try:
+      shell = GuiShell(outer=self, manifest_path=manifest_path, model=model_name)
+      shell.start()
+    except Exception as e:
+      self.msg_queue.put(('error', str(e)))
+
+  def _process_queue(self):
+    try:
+      while True:
+        msg_type, content = self.msg_queue.get_nowait()
+        if msg_type == 'print':
+          self._write_output(content)
+        elif msg_type == 'error':
+          messagebox.showerror("系统故障", content)
+        self.msg_queue.task_done()
+    except queue.Empty:
+      pass
+    self.root.after(100, self._process_queue)
 
 
 if __name__ == "__main__":
-  main()
+  app_root = ctk.CTk()
+  app = CvaUltraGui(app_root)
+  app_root.mainloop()

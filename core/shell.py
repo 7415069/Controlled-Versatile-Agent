@@ -286,33 +286,26 @@ class UniversalShell:
         length += 1
     return length
 
-  def _pad_line(self, label: str, value: str, width: int = 56) -> str:
-    """对一行内容进行视觉宽度对齐"""
-    line_content = f"  {label:<10}: {value}"
-    vlen = self._visual_len(line_content)
-    padding = " " * max(0, width - vlen)
-    return f"║ {line_content}{padding} ║"
+  def _pad_line(self, label: str, value: str, width: int = 50) -> str:
+    """简化对齐逻辑：不再计算复杂的视觉宽度，改用标准字符串填充"""
+    # 使用简单的分隔符代替复杂的边框
+    return f"  {label:<10} : {value}"
 
   def _print_banner(self):
     m = self._manifest
     sid = self._memory.session_id
     status = "恢复 (Resumed)" if self._memory.messages else "新建 (New)"
 
-    inner_width = 58
-    line = "═" * inner_width
+    # 改用更现代、更简单的分隔符，避免特殊 Unicode 字符在 GUI 中产生的宽度偏差
+    line = "─" * 110
 
-    print("\n╔" + line + "╗")
-    title = " 受控百变智能体 (CVA) v3.4  —  启动中 "
-    v_title_len = self._visual_len(title)
-    title_padding = " " * ((inner_width - v_title_len) // 2)
-    suffix_padding = title_padding + (" " if (inner_width - v_title_len) % 2 != 0 else "")
-    print(f"║{title_padding}{title}{suffix_padding}║")
-    print("╠" + line + "╣")
-    print(self._pad_line("角色", m.role_name))
+    print(f"\n{line}")
+    print(f" 🚀 CVA SYSTEM v3.4 | {m.role_name}")
+    print(f"{line}")
     print(self._pad_line("模型", self._model))
-    print(self._pad_line("Session", sid[:36]))
-    print(self._pad_line("记忆状态", status))
-    print("╚" + line + "╝")
+    print(self._pad_line("Session", sid))
+    print(self._pad_line("状态", status))
+    print(f"{line}\n")
 
   def _get_effective_system_prompt(self) -> str:
 
