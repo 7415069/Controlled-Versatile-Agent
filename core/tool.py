@@ -586,7 +586,7 @@ class RunShellTool(Tool):
         return ok({
           "stdout": result.stdout,
           "stderr": result.stderr,
-          "return_code": result.returncode,
+          "returncode": result.returncode,
           "command": command,
           "args": args,
         })
