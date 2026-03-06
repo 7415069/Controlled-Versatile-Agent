@@ -49,7 +49,7 @@ class RoleManifest:
     "search_files",
     "http_request",
     "submit_plan",
-    "execute_python",
+    "execute_python_script",
   }
 
   def validate(self):

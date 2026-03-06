@@ -111,8 +111,8 @@ class TestUniversalShellCapabilities(unittest.TestCase):
 
   def setUp(self):
     # 创建临时目录
-    self.temp_dir_str = tempfile.mkdtemp()  # 先保留字符串形式
-    self.temp_dir = Path(self.temp_dir_str)  # <-- 转换为 Path 对象
+    self.temp_dir_str = tempfile.mkdtemp()
+    self.temp_dir = Path(self.temp_dir_str)
 
     self.log_dir = self.temp_dir / "audit-logs"
     self.memory_dir = self.temp_dir / "memory"
@@ -122,23 +122,31 @@ class TestUniversalShellCapabilities(unittest.TestCase):
     self.workspace_dir.mkdir()
 
     # 创建一个临时的 roles 目录和 manifest 文件
-    self.roles_dir = Path(self.temp_dir) / "roles"
+    self.roles_dir = self.temp_dir / "roles"
     self.roles_dir.mkdir()
     self.manifest_path = self.roles_dir / "developer-v1.yaml"
-    # 使用项目自带的 developer-v1.yaml 内容
     original_manifest_path = Path(__file__).parent.parent / "roles" / "developer-v1.yaml"
     if not original_manifest_path.exists():
       original_manifest_path = Path(__file__).parent / "roles" / "developer-v1.yaml"
     shutil.copy(original_manifest_path, self.manifest_path)
 
-    # 创建虚拟项目结构
-    (self.temp_dir / "src").mkdir()  # <-- 现在 self.temp_dir 是 Path 对象，可以正常使用 /
+    # 在 temp_dir 内创建 Agent 需要的目录结构
+    (self.temp_dir / "core").mkdir()
+    (self.temp_dir / "core" / "manifest.py").write_text("class RoleManifest: pass\n")
+    (self.temp_dir / "tests").mkdir()
+    (self.temp_dir / "docs").mkdir()
+    (self.temp_dir / "temp_backup").mkdir()
+    (self.temp_dir / "src").mkdir()
     (self.temp_dir / "src" / "main.py").write_text("class MyClass:\n    def __init__(self): pass\n    def run(self): pass")
     (self.temp_dir / "src" / "config.json").write_text(json.dumps({"version": "1.0", "active": True}))
-    (self.temp_dir / "docs").mkdir()
     (self.temp_dir / "docs" / "plan.md").write_text("Initial plan document.")
     (self.temp_dir / "test_file.txt").write_text("This is a test file for reading and writing.")
     (self.temp_dir / "log.txt").write_text("Log entry 1\nLog entry 2\n")
+
+    # ── 关键修复：切换工作目录到 temp_dir ──
+    # Agent 用相对路径操作文件，必须在隔离目录内运行，否则文件写到项目根
+    self._original_cwd = os.getcwd()
+    os.chdir(self.temp_dir_str)
 
     # 捕获 stdout 和 stdin
     self.mock_stdout = io.StringIO()
@@ -152,7 +160,8 @@ class TestUniversalShellCapabilities(unittest.TestCase):
     # 恢复 stdout 和 stdin（先恢复，避免后续 print 失败）
     sys.stdout = self.original_stdout
     sys.stdin = self.original_stdin
-    # 清理临时目录（只调用一次，用字符串形式）
+    # 恢复工作目录后再清理 temp（顺序不能反）
+    os.chdir(self._original_cwd)
     if os.path.exists(self.temp_dir_str):
       shutil.rmtree(self.temp_dir_str)
 
@@ -212,13 +221,13 @@ class TestUniversalShellCapabilities(unittest.TestCase):
       # 4. write_file
       LLMResponse(
           text="文件内容已读取。现在向 'new_file.txt' 写入一些内容。",
-          tool_calls=[ToolCall(id="call_write", name="write_file", input={"path": "new_file.txt", "content": "Hello from CVA!", "reason": "测试写入"})],
+          tool_calls=[ToolCall(id="call_write", name="write_file", input={"path": "agent_workspace/new_file.txt", "content": "Hello from CVA!", "reason": "测试写入"})],
           finish_reason="tool_calls"
       ),
       # 5. append_file
       LLMResponse(
           text="文件已写入。现在向 'log.txt' 追加一行内容。",
-          tool_calls=[ToolCall(id="call_append", name="append_file", input={"path": "log.txt", "content": "Log entry 3\n", "reason": "添加日志"})],
+          tool_calls=[ToolCall(id="call_append", name="append_file", input={"path": "agent_workspace/log.txt", "content": "Log entry 3\n", "reason": "添加日志"})],
           finish_reason="tool_calls"
       ),
       # 6. backup_file
@@ -309,12 +318,14 @@ class TestUniversalShellCapabilities(unittest.TestCase):
       self.assertEqual((self.workspace_dir / "new_file.txt").read_text(), "Hello from CVA!", "new_file.txt 内容不匹配")
       print("✅ new_file.txt 写入验证通过")
 
-      self.assertEqual((self.workspace_dir / "log.txt").read_text(), "Log entry 1\nLog entry 2\nLog entry 3\n", "log.txt 内容不匹配")
+      # log.txt 写在 agent_workspace/，是新文件，只有追加的那一行
+      self.assertTrue((self.workspace_dir / "log.txt").exists(), "agent_workspace/log.txt 应该存在")
+      self.assertIn("Log entry 3", (self.workspace_dir / "log.txt").read_text(), "log.txt 应含追加内容")
       print("✅ log.txt 追加验证通过")
 
-      # 验证备份文件 (文件名会包含时间戳，所以只检查是否存在类似文件)
-      backup_files = list(self.workspace_dir.glob("src/main-*.py"))
-      self.assertTrue(len(backup_files) >= 1, "main.py 的备份文件应该存在")
+      # 验证备份文件（backup_file 在 src/main.py 同目录生成 src/main-{timestamp}.py）
+      backup_files = list(self.temp_dir.glob("src/main-*.py"))
+      self.assertTrue(len(backup_files) >= 1, "src/main.py 的备份文件应该存在")
       print("✅ main.py 备份验证通过")
 
       # 验证 Python 脚本执行 (通过检查输出)
