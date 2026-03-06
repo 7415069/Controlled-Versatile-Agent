@@ -264,11 +264,17 @@ class UniversalShell:
   def _safe_input(self, _prompt: str):
     sys.stdout.write(_prompt)
     sys.stdout.flush()
-    line = sys.stdin.buffer.readline()
-    try:
-      return line.decode('utf-8').strip()
-    except UnicodeDecodeError:
-      return line.decode('gbk', errors='replace').strip()
+
+    # 兼容性修复：检查 stdin 是否有 buffer 属性
+    if hasattr(sys.stdin, 'buffer'):
+      line = sys.stdin.buffer.readline()
+      try:
+        return line.decode('utf-8').strip()
+      except UnicodeDecodeError:
+        return line.decode('gbk', errors='replace').strip()
+    else:
+      # 在没有 buffer 的环境下（如 io.StringIO 或某些 IDE 控制台）直接读取字符串
+      return sys.stdin.readline().strip()
 
   def _visual_len(self, text: str) -> int:
     """计算字符串的视觉宽度"""
