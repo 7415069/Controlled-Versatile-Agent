@@ -207,8 +207,8 @@ class UniversalShell:
   # ── 工具分发 ───────────────────────────────────────────────
 
   # 高危工具分级表
-  _P0_TOOLS = {"write_file", "run_shell", "execute_python"}  # 必须自省
-  _P1_TOOLS = {"append_file", "backup_file"}  # 可选自省
+  _P0_TOOLS = {"run_shell"}  # 必须自省，只有shell命令才是真正高危
+  _P1_TOOLS = {"write_file", "append_file", "backup_file"}  # 可选自省
 
   def _dispatch_tool(self, tool_name: str, tool_input: Dict, call_id: str) -> Dict:
     t0 = time.time()
