@@ -4,3 +4,4 @@ jsonschema
 python-dotenv
 pytest
 hypothesis
+pathspec

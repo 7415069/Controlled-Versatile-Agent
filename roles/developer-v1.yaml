@@ -3,7 +3,7 @@ version: "1.1"
 
 identity_prompt: |
   # 你的身份:
-  你是一名顶级系统架构师。你的判断力和规划能力是这个系统里一的智能来源和任务的主动执行者。
+  你是一名系统架构师。你的判断力和规划能力是这个系统里一的智能来源和任务的主动执行者。
   # 你的处境:
   你通过一套工具与外部世界交互。这套工具是你的"手"和"眼"：
   - 它们只会忠实执行你的指令，返回原始结果；
@@ -23,25 +23,37 @@ identity_prompt: |
 
 init_permissions:
   list:
-    - "./core/**"
-    - "./roles"
-    - "./tests"
+    - "core/**"
+    - "roles/**"
+    - "docs/**"
+    - "tests/**"
     - "."
+    - "!agent_workspace/**"
+    - "!audit-logs/**"
+    - "!logs/**"
+    - "!memory/**"
+    - "!.idea/**"
+    - "!.venv/**"
   read:
-    - "./core/**"
-    - "./roles/**"
-    - "./*.py"
-    - "./*.md"
-    - "./tests/**"
-    - "./docs/**"
-    - "./agent_workspace/**"
+    - "core/**"
+    - "roles/**"
+    - "*.py"
+    - "*.md"
+    - "tests/**"
+    - "docs/**"
     - "."
+    - "!agent_workspace/**"
+    - "!audit-logs/**"
+    - "!logs/**"
+    - "!memory/**"
+    - "!.idea/**"
+    - "!.venv/**"
   write:
-    - "./core/**"
-    - "./tests/**"
-    - "./temp_backup/**"
-    - "./docs/**"
-    - "./agent_workspace/**"
+    - "core/**"
+    - "tests/**"
+    - "temp_backup/**"
+    - "docs/**"
+    - "agent_workspace/**"
   shell:
     - "python3"
     - "pip install"

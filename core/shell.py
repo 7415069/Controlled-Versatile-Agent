@@ -260,16 +260,14 @@ class UniversalShell:
 
   # ── 辅助方法 ──
 
-  def _safe_input(self, prompt: str) -> str:
-    sys.stdout.write(prompt)
+  def _safe_input(self, _prompt: str):
+    sys.stdout.write(_prompt)
     sys.stdout.flush()
-
-    if hasattr(sys.stdin, 'buffer') and hasattr(sys.stdin.buffer, 'readline'):
-      line = sys.stdin.buffer.readline()
-      decoded = line.decode('utf-8').strip()
-      return decoded
-    else:
-      return sys.stdin.readline().strip()
+    line = sys.stdin.buffer.readline()
+    try:
+      return line.decode('utf-8').strip()
+    except UnicodeDecodeError:
+      return line.decode('gbk', errors='replace').strip()
 
   def _visual_len(self, text: str) -> int:
     """计算字符串的视觉宽度"""
