@@ -94,7 +94,7 @@ class EscalationManager:
     self._llm_call = fn
 
   def check(self, tool_name: str, target: str, permission_type: str, reason: str = "", context_summary: str = "") -> tuple[bool, Optional[str]]:
-    # 1. 检查自动拒绝模式
+    # 1. 检查自动拒绝模式（CRITICAL 级别，直接拒绝，不触发 LLM）
     if self._matches_auto_deny(target):
       self._audit("AUTO_DENIED", {"tool_name": tool_name, "target": target})
       return False, f"访问被自动拒绝：路径 `{target}` 命中安全黑名单。"
@@ -106,9 +106,7 @@ class EscalationManager:
     # 3. 检查是否有重复的已批准申请
     duplicate_record = self._find_duplicate_approval(tool_name, target, permission_type)
     if duplicate_record:
-      # 检查是否过期
       if not self._is_expired(duplicate_record):
-        # 自动批准重复申请
         self._audit("AUTO_APPROVED_DUPLICATE", {
           "request_id": duplicate_record.request_id,
           "tool_name": tool_name,
@@ -117,13 +115,23 @@ class EscalationManager:
         })
         return True, None
       else:
-        # 权限已过期，需要重新申请
         self._revoke_expired_permission(duplicate_record)
 
-    # 4. 创建新的越权申请
+    # 4. 创建越权申请
     req = self._create_request(tool_name, target, permission_type, reason, context_summary)
 
-    # 5. LLM 二次确认
+    # ─── 增强：风险分级，LOW 自动批准，跳过 LLM ───
+    risk_level = self._classify_risk_level(tool_name, target, permission_type)
+    req_detail = f"风险级别={risk_level}, 工具={tool_name}, 路径={target}, 权限={permission_type}"
+    self._audit("RISK_CLASSIFIED", {"request_id": req.request_id, "risk_level": risk_level, "detail": req_detail})
+
+    if risk_level == "LOW":
+      # 自动批准，跳过所有 LLM 调用
+      self.approve(req.request_id)
+      self._audit("AUTO_APPROVED_LOW_RISK", {"request_id": req.request_id})
+      return True, None
+
+    # 5. LLM 二次确认（MEDIUM 和 HIGH 才触发）
     pre_screen = self._llm_pre_screen(req)
     req.llm_pre_screen_result = "necessary" if pre_screen.is_necessary else "unnecessary"
     req.llm_pre_screen_reason = pre_screen.reasoning
@@ -135,10 +143,53 @@ class EscalationManager:
       self._audit("LLM_SELF_DENIED", {"request_id": req.request_id, "llm_reasoning": pre_screen.reasoning})
       return False, f"越权访问 `{target}` 已被智能降级拒绝。\n理由：{pre_screen.reasoning}"
 
-    # 6. 人类审批
-    self._audit("LLM_PRE_SCREEN_PASSED", {"request_id": req.request_id})
+    # 6. MEDIUM：pre_screen 通过后自动批准；HIGH：需人类审批
+    self._audit("LLM_PRE_SCREEN_PASSED", {"request_id": req.request_id, "risk_level": risk_level})
+
+    if risk_level == "MEDIUM":
+      self.approve(req.request_id)
+      self._audit("AUTO_APPROVED_MEDIUM_RISK", {"request_id": req.request_id})
+      return True, None
+
+    # HIGH：走人类审批
     approved, message = self._ask_human(req)
     return (True, None) if approved else (False, message)
+
+  def _classify_risk_level(self, tool_name: str, target: str, permission_type: str) -> str:
+    """
+    增强：风险分级规则引擎（零 LLM 调用）。
+    LOW    → 自动批准（无需 LLM）
+    MEDIUM → LLM pre_screen 通过后自动批准
+    HIGH   → LLM pre_screen + 人类审批
+    """
+    target_lower = target.lower()
+
+    # CRITICAL 级别由 _matches_auto_deny 在外层处理，此处不再重复
+
+    # HIGH 级别：破坏性 shell 操作，或涉及敏感信息
+    high_indicators = [
+      # execute_python 能力极强，始终 HIGH
+      tool_name == "execute_python_script",
+      # run_shell：只有写操作或含危险关键词才 HIGH，只读命令（ls/cat/grep）是 MEDIUM
+      (tool_name == "run_shell" and any(
+          kw in target_lower for kw in ["rm ", "dd ", "mkfs", "chmod", "chown", "sudo", "> /", ">> /"]
+      )),
+      # 含敏感关键词的路径
+      any(kw in target_lower for kw in ["secret", "password", "token", "credential", ".env"]),
+    ]
+    if any(high_indicators):
+      return "HIGH"
+
+    # LOW 级别：只读操作且目标在已知安全范围内
+    safe_prefixes = ["./core", "./tests", "./docs", "./agent_workspace", "./roles"]
+    is_read_only = permission_type in ("read", "list")
+    in_safe_dir = any(target.startswith(p) for p in safe_prefixes)
+
+    if is_read_only and in_safe_dir:
+      return "LOW"
+
+    # MEDIUM：write 到项目目录，一般 shell 命令，http 请求等
+    return "MEDIUM"
 
   def approve(self, request_id: str, approved_paths: Optional[List[str]] = None):
     with self._lock:
@@ -209,10 +260,22 @@ class EscalationManager:
     if not self._llm_call:
       return PreScreenResult(is_necessary=True, reasoning="二次确认不可用。")
     print(f"\n[CVA·二次确认] 🤔 正在评估必要性: {req.tool_name}({req.requested_path})")
+
+    # ─── 增强：_classify_risk_level 已在外层处理了 LOW/CRITICAL，此处只处理 MEDIUM/HIGH ───
+    risk_level = self._classify_risk_level(req.tool_name, req.requested_path, req.permission_type)
+
     try:
       return self._llm_call(req)
     except Exception as e:
-      return PreScreenResult(is_necessary=True, reasoning=f"异常: {e}")
+      # ─── 修复：LLM 失败时按风险级别决定降级策略，而非一律放行 ───
+      if risk_level == "HIGH":
+        # HIGH 风险：LLM 失败 → 要求人类审批（不自动放行）
+        print(f"[CVA·二次确认] ⚠️  LLM 调用失败（{e}），HIGH 风险操作升级为人类审批")
+        return PreScreenResult(is_necessary=True, reasoning=f"LLM 不可用，HIGH 风险需人类确认。原始错误: {e}")
+      else:
+        # MEDIUM 风险：LLM 失败 → 保守放行（已有基础权限检查兜底）
+        print(f"[CVA·二次确认] ⚠️  LLM 调用失败（{e}），MEDIUM 风险保守放行")
+        return PreScreenResult(is_necessary=True, reasoning=f"LLM 不可用，MEDIUM 风险保守放行。原始错误: {e}")
 
   def _ask_human(self, req: EscalationRequest) -> tuple[bool, str]:
     print("\n" + "═" * 60)

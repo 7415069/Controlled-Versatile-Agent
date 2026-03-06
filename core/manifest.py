@@ -83,6 +83,7 @@ def load_manifest(path: str) -> RoleManifest:
   # 解析 permissions
   perm_raw = raw.get("init_permissions", {})
   permissions = Permissions(
+      list=perm_raw.get("list", []),  # ← 修复：补全缺失的 list 字段
       read=perm_raw.get("read", []),
       write=perm_raw.get("write", []),
       shell=perm_raw.get("shell", []),

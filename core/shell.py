@@ -136,14 +136,17 @@ class UniversalShell:
 
     sys_logger.info(f"开始任务循环。Session ID: {self._memory.session_id}")
     while self._iteration < self._max_iterations:
-      # 只有当上一条消息不是 tool_calls 时，才插入系统指令
       last_msg = self._memory.messages[-1] if self._memory.messages else {}
       is_in_middle_of_tools = last_msg.get("role") == "assistant" and "tool_calls" in last_msg
 
+      # ─── 增强：动态反思指令（基于 TaskState，而非固定文本）───
       if self._iteration > 0 and self._iteration % 5 == 0 and not is_in_middle_of_tools:
+        state = self._memory.get_current_state()
+        reflection = self._build_reflection_prompt(state)
         self._memory.append({
           "role": "system",
-          "content": "**自主反思指令**：你已执行多轮操作。请评估当前进度，是否需要修正计划？"
+          "content": reflection,
+          "_importance": "ANCHOR"  # 反思指令本身是重要的
         })
 
       self._iteration += 1
@@ -203,16 +206,47 @@ class UniversalShell:
 
   # ── 工具分发 ───────────────────────────────────────────────
 
+  # 高危工具分级表
+  _P0_TOOLS = {"write_file", "run_shell", "execute_python"}  # 必须自省
+  _P1_TOOLS = {"append_file", "backup_file"}  # 可选自省
+
   def _dispatch_tool(self, tool_name: str, tool_input: Dict, call_id: str) -> Dict:
     t0 = time.time()
     print(f"\n🔧 {tool_name}({json.dumps(tool_input, ensure_ascii=False)[:120]})")
     enriched_input = {**tool_input, "_context_summary": self._context_summary()}
+
+    # ─── 增强：P0 高危工具前置自省 ───
+    if tool_name in self._P0_TOOLS:
+      review = self._pre_execute_review(tool_name, tool_input)
+      if not review.get("is_safe", True):
+        issues = "; ".join(review.get("issues", ["未知问题"]))
+        suggestion = review.get("suggestion", "请检查后重试")
+        print(f"   🛑 [自省拦截] 发现问题：{issues}")
+        print(f"   💡 建议：{suggestion}")
+        result = {
+          "status": "error",
+          "message": f"[自省拦截] 操作被安全检查阻止。问题：{issues}。建议：{suggestion}"
+        }
+        return convert_tool_result_to_litellm(call_id, json.dumps(result, ensure_ascii=False))
+
+    # ─── submit_plan：成功后更新 TaskState ───
     tool = self._tools.get(tool_name)
     if not tool:
       result = {"status": "error", "message": f"工具 `{tool_name}` 未注册"}
     else:
       try:
         result = tool.execute(**enriched_input)
+        # 拦截 submit_plan 成功结果，更新状态机
+        if tool_name == "submit_plan" and result.get("status") == "ok":
+          self._memory.update_task_state(
+              goal=tool_input.get("goal", ""),
+              milestones=tool_input.get("milestones", []),
+              iteration=self._iteration,
+          )
+          # 标记 active_step 进展（可选：尝试匹配关键词）
+          self._memory.get_current_state().add_knowledge(
+              "last_plan_iteration", str(self._iteration)
+          )
       except Exception as e:
         result = {"status": "error", "message": str(e)}
 
@@ -304,21 +338,16 @@ class UniversalShell:
       - 提示：请评估任务复杂度与 Token 消耗。如果消耗过快且无进展，请反思并切换更高效的策略（如编写批量处理脚本）。
     """).strip()
 
-    # 1. 获取 YAML 中定义的原始 identity_prompt
     raw_prompt = self._manifest.identity_prompt
-    # 2. 获取能力和权限列表
     cap_json = json.dumps(self._manifest.capabilities, ensure_ascii=False, indent=2)
     cap_json = f"```json\n{cap_json}\n```"
 
     perm_json = json.dumps(self._perm.snapshot(), ensure_ascii=False, indent=2)
     perm_json = f"```json\n{perm_json}\n```"
 
-    # 3. 执行变量替换
-    # 这样 YAML 里的 ${capabilities} 和 ${init_permissions} 就会变成真实数据
     effective_prompt = raw_prompt.replace("${capabilities}", cap_json)
     effective_prompt = effective_prompt.replace("${permissions}", perm_json)
 
-    # 4. 额外补充当前的运行时环境（可选，但极有用）
     law_prompt = textwrap.dedent(f"""
       ---
       ### ⚡ 运行时状态 (实时更新)
@@ -327,7 +356,91 @@ class UniversalShell:
       - 提示：底座会自动对旧消息历史进行脱水，如需查看完整代码请重新 read_file。
     """).strip()
 
-    return f"{effective_prompt}\n\n{cost_report}\n\n{law_prompt}"
+    # ─── 增强：注入 TaskState 状态块 ───
+    task_state_block = self._memory.get_current_state().to_prompt_block()
+
+    parts = [effective_prompt, cost_report, law_prompt]
+    if task_state_block:
+      parts.append(task_state_block)
+
+    return "\n\n".join(parts)
+
+  def _build_reflection_prompt(self, state) -> str:
+    """
+    增强：基于 TaskState 生成有针对性的动态反思指令，而非固定文本。
+    """
+    if not state.current_goal:
+      return "**自主反思**：你已执行多轮操作。请评估当前进度，如有需要请调用 submit_plan 更新计划。"
+
+    completed = len(state.completed_steps)
+    total = len(state.plan)
+    active = state.active_step or "（无明确步骤）"
+
+    prompt_parts = [
+      f"**自主反思**（第 {self._iteration} 轮）：",
+      f"- 当前目标：{state.current_goal}",
+      f"- 进度：{completed}/{total} 步骤完成，当前步骤：{active}",
+    ]
+
+    if state.pending_risks:
+      prompt_parts.append(f"- ⚠️ 待处理风险：{'; '.join(state.pending_risks[-2:])}")
+
+    if completed == 0 and self._iteration > 10:
+      prompt_parts.append("- 🔴 警告：已执行 10+ 轮但无步骤完成，请评估是否需要重新规划。")
+    elif completed == total and total > 0:
+      prompt_parts.append("- ✅ 所有步骤已完成，请总结结果并宣布任务完成。")
+    else:
+      prompt_parts.append("- 请确认当前步骤是否在正确路径上，如有偏差请调用 submit_plan 更新。")
+
+    return "\n".join(prompt_parts)
+
+  def _pre_execute_review(self, tool_name: str, tool_input: Dict) -> Dict:
+    """
+    增强：P0 高危工具前置自省（每次 P0 工具调用额外 +1 次 LLM，约 512 tokens）。
+    返回 {"is_safe": bool, "issues": [...], "suggestion": str}
+    """
+    state = self._memory.get_current_state()
+    state_summary = f"当前步骤：{state.active_step}" if state.active_step else "无明确任务步骤"
+
+    user_msg = textwrap.dedent(f"""
+      即将执行高危工具，请评估安全性：
+
+      工具名称：{tool_name}
+      工具参数：{json.dumps(tool_input, ensure_ascii=False, indent=2)[:800]}
+      {state_summary}
+
+      请重点检查：
+      1. 路径是否正确（有无拼写错误、路径穿越风险）
+      2. 操作是否可逆（写操作前是否应先备份）
+      3. 命令是否包含危险参数（如 rm -rf、chmod 777 等）
+      4. 内容是否与当前任务目标相符
+    """).strip()
+
+    output_schema = {
+      "type": "object",
+      "properties": {
+        "is_safe": {"type": "boolean", "description": "操作是否安全可以执行"},
+        "issues": {"type": "array", "items": {"type": "string"}, "description": "发现的问题列表"},
+        "suggestion": {"type": "string", "description": "修改建议（is_safe=false 时必填）"},
+      },
+      "required": ["is_safe", "issues", "suggestion"],
+    }
+
+    result = self._llm.structured_chat(
+        messages=[{"role": "user", "content": user_msg}],
+        system_prompt="你是 CVA 代码安全审查模块。仅判断操作的技术安全性，不考虑业务逻辑。用简洁的中文回答。",
+        output_schema=output_schema,
+        function_name="submit_review",
+        function_description="提交安全审查结果",
+        max_tokens=512,
+    )
+
+    if result is None:
+      # LLM 调用失败：保守策略，允许执行但记录警告
+      print("   ⚠️  [自省] LLM 调用失败，跳过安全检查")
+      return {"is_safe": True, "issues": [], "suggestion": ""}
+
+    return result
 
   def _should_dehydrate(self, content: str) -> bool:
     """快速判断是否需要脱水"""
@@ -380,17 +493,35 @@ class UniversalShell:
     return PreScreenResult(is_necessary=bool(result.get("is_necessary")), reasoning=str(result.get("reasoning")), alternative=str(result.get("alternative")))
 
   def _context_summary(self, last_n: int = 6) -> str:
-    """生成上下文摘要"""
+    """生成上下文摘要（增强：纳入 tool 结果，提升 pre_screen 准确性）"""
     msgs = self._memory.messages
     recent = msgs[-last_n:] if len(msgs) > last_n else msgs
     lines = []
     for m in recent:
       role = m.get("role", "")
-      if role not in ("user", "assistant"):
-        continue
-      text = str(m.get("content", ""))
-      if text:
-        lines.append(f"[{'用户' if role == 'user' else '助手'}] {text[:150]}")
+      if role == "user":
+        text = str(m.get("content", ""))
+        if text:
+          lines.append(f"[用户] {text[:150]}")
+      elif role == "assistant":
+        text = str(m.get("content", ""))
+        tool_calls = m.get("tool_calls", [])
+        if text:
+          lines.append(f"[助手] {text[:150]}")
+        for tc in tool_calls:
+          if isinstance(tc, dict):
+            fn = tc.get("function", {})
+            lines.append(f"[调用] {fn.get('name', '?')}({str(fn.get('arguments', ''))[:80]})")
+      elif role == "tool":
+        # 增强：纳入 tool 结果摘要
+        try:
+          data = json.loads(m.get("content", "{}"))
+          status = data.get("status", "?")
+          inner = data.get("data", data.get("message", ""))
+          summary = str(inner)[:120] if inner else ""
+          lines.append(f"[工具结果:{status}] {summary}")
+        except Exception:
+          lines.append(f"[工具结果] {str(m.get('content', ''))[:100]}")
     return "\n".join(lines)
 
 

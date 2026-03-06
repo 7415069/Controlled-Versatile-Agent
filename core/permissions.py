@@ -26,23 +26,28 @@ class PermissionChecker:
   """
 
   def __init__(self, init_permissions: Permissions):
-    self._list_patterns: List[str] = list(init_permissions.list)
-    self._read_patterns: List[str] = list(init_permissions.read)
-    self._write_patterns: List[str] = list(init_permissions.write)
-    self._shell_prefixes: List[str] = list(init_permissions.shell)
-
-    # 线程安全锁
+    # 线程安全锁（必须最先初始化，_normalize_patterns 内部会用到 _secure_normalize）
     self._lock = threading.RLock()
 
-    # 权限变更历史（用于审计）
-    self._permission_history: List[Dict] = []
-
-    # 预编译的危险路径模式
+    # 预编译的危险路径模式（_secure_normalize 会调用，必须在规范化前准备好）
     self._dangerous_patterns = {
       '/etc/*', '/bin/*', '/sbin/*', '/usr/bin/*', '/usr/sbin/*',
       '/boot/*', '/sys/*', '/proc/*', '/dev/*', '/root/*',
       '*/.ssh/*', '*/.gnupg/*', '*/.aws/*', '*/.config/*'
     }
+
+    # ─── 修复：init 时就把所有 patterns 规范化为绝对路径 ───
+    # 这样 _match_path 里的 pattern 和 can_* 里规范化后的 target 格式一致，才能匹配上
+    self._list_patterns: List[str] = self._normalize_patterns(init_permissions.list)
+    self._read_patterns: List[str] = self._normalize_patterns(init_permissions.read)
+    self._write_patterns: List[str] = self._normalize_patterns(init_permissions.write)
+    self._shell_prefixes: List[str] = list(init_permissions.shell)  # shell 前缀不是路径，不需规范化
+
+    # 保存初始权限快照（revoke_all 用），同样是规范化后的
+    self._init_list_patterns: List[str] = list(self._list_patterns)
+    self._init_read_patterns: List[str] = list(self._read_patterns)
+    self._init_write_patterns: List[str] = list(self._write_patterns)
+    self._init_shell_prefixes: List[str] = list(self._shell_prefixes)
 
     # 性能优化：危险命令集合（使用集合查找，O(1)复杂度）
     self._dangerous_commands = {
@@ -57,6 +62,8 @@ class PermissionChecker:
     self._cache_max_size = 1000
     self._cache_hits = 0
     self._cache_misses = 0
+    # 权限变更历史（用于审计）
+    self._permission_history: List[Dict] = []
     os.makedirs("./agent_workspace", exist_ok=True)
 
   # ─── 权限检查 ──────────────────────────────────────────────
@@ -160,7 +167,7 @@ class PermissionChecker:
   # ─── 白名单扩展（人类批准后调用）─────────────────────────
 
   def grant_read(self, paths: List[str]):
-    """授予读权限"""
+    """授予读权限（修复：在授权时一次性规范化模式，避免每次匹配重复计算）"""
     with self._lock:
       added = []
       for p in paths:
@@ -171,7 +178,6 @@ class PermissionChecker:
 
       if added:
         self._record_permission_change("grant_read", added)
-        # 清除所有读权限缓存（简单粗暴但有效）
         self._clear_cache_for_type("read")
 
   def grant_write(self, paths: List[str]):
@@ -252,16 +258,15 @@ class PermissionChecker:
         self._clear_cache_for_type("shell")
 
   def revoke_all(self):
-    """撤销所有临时授予的权限，恢复到初始状态"""
+    """撤销所有动态授权权限，恢复到初始状态（修复：不再清除初始权限）"""
     with self._lock:
-      # 记录撤销前的状态
       before_snapshot = self.snapshot()
 
-      # 恢复到初始权限（需要保存初始权限）
-      # 这里简化为清空所有权限
-      self._read_patterns.clear()
-      self._write_patterns.clear()
-      self._shell_prefixes.clear()
+      # ─── 修复：恢复到初始权限，而不是清空所有 ───
+      self._list_patterns = list(self._init_list_patterns)
+      self._read_patterns = list(self._init_read_patterns)
+      self._write_patterns = list(self._init_write_patterns)
+      self._shell_prefixes = list(self._init_shell_prefixes)
 
       # 清除所有缓存
       self._permission_cache.clear()
@@ -295,6 +300,48 @@ class PermissionChecker:
       return list(self._permission_history)
 
   # ─── 私有方法 ─────────────────────────────────────────────
+
+  def _normalize_patterns(self, patterns: List[str]) -> List[str]:
+    """
+    将路径模式列表规范化为绝对路径，同时保留通配符（**、*、?）。
+    例：'./core/**' → '/abs/path/core/**'
+    规范化在 init 时一次性完成，避免每次匹配重复计算。
+    """
+    normalized = []
+    for raw in patterns:
+      if not raw:
+        continue
+      # 分离路径主体和尾部通配符段（** / * 不能直接传给 os.path.abspath）
+      # 策略：找到第一个含通配符的段，对其前缀规范化，再拼回通配符后缀
+      parts = raw.replace('\\', '/').split('/')
+      prefix_parts = []
+      wildcard_parts = []
+      hit_wildcard = False
+      for part in parts:
+        if hit_wildcard or '*' in part or '?' in part:
+          hit_wildcard = True
+          wildcard_parts.append(part)
+        else:
+          prefix_parts.append(part)
+
+      prefix = '/'.join(prefix_parts) if prefix_parts else '.'
+      try:
+        abs_prefix = os.path.abspath(os.path.expanduser(prefix))
+      except Exception:
+        continue
+
+      if wildcard_parts:
+        norm = abs_prefix + os.sep + os.sep.join(wildcard_parts)
+        norm = os.path.normpath(norm).replace('**', '\x00').replace('*', '\x00').replace('\x00', '*')
+        # normpath 会把 ** 压缩，需要还原；用占位符绕过
+        # 更稳健的方式：直接字符串拼接，不走 normpath
+        norm = abs_prefix + os.sep + os.sep.join(wildcard_parts)
+      else:
+        norm = abs_prefix
+
+      normalized.append(norm)
+
+    return normalized
 
   def _update_cache(self, key: str, value: bool):
     """更新缓存（LRU策略）"""
@@ -454,31 +501,21 @@ class PermissionChecker:
   def _match_path(self, normalized_path: str, patterns: List[str]) -> bool:
     """
     AntPath 风格路径匹配。
+    修复：patterns 已在 grant 时规范化，无需每次重复调用 _secure_normalize。
 
     通配符语义（与 Spring AntPathMatcher 对齐）：
       ?   匹配单个任意字符（不含路径分隔符）
       *   匹配同一路径段内的任意字符串（不跨 /）
       **  匹配零个或多个完整路径段（可跨 /）
-
-    典型示例：
-      /project/**          → 匹配 /project 本身及其所有子路径
-      /project/src/*.py    → 匹配 src 下所有 .py 文件（不递归）
-      /project/**/test_*   → 匹配任意层级下以 test_ 开头的条目
-      /tmp/?/file.txt      → 匹配 /tmp/a/file.txt，不匹配 /tmp/ab/file.txt
     """
     try:
       for pattern in patterns:
         if not pattern:
           continue
-
-        # 规范化模式（解析 ~、相对路径、符号链接等）
-        norm_pattern = self._secure_normalize(pattern)
-        if norm_pattern is None:
-          continue
-
-        if self._antpath_match(normalized_path, norm_pattern):
+        # 修复：初始化时模式已原始字符串形式存储（grant 时已规范化）
+        # 直接使用，不再重复调用 _secure_normalize
+        if self._antpath_match(normalized_path, pattern):
           return True
-
       return False
     except Exception:
       return False

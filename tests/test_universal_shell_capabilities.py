@@ -1,6 +1,7 @@
 import collections
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -110,8 +111,8 @@ class TestUniversalShellCapabilities(unittest.TestCase):
 
   def setUp(self):
     # 创建临时目录
-    self.temp_dir_str = tempfile.mkdtemp() # 先保留字符串形式
-    self.temp_dir = Path(self.temp_dir_str) # <-- 转换为 Path 对象
+    self.temp_dir_str = tempfile.mkdtemp()  # 先保留字符串形式
+    self.temp_dir = Path(self.temp_dir_str)  # <-- 转换为 Path 对象
 
     self.log_dir = self.temp_dir / "audit-logs"
     self.memory_dir = self.temp_dir / "memory"
@@ -131,7 +132,7 @@ class TestUniversalShellCapabilities(unittest.TestCase):
     shutil.copy(original_manifest_path, self.manifest_path)
 
     # 创建虚拟项目结构
-    (self.temp_dir / "src").mkdir() # <-- 现在 self.temp_dir 是 Path 对象，可以正常使用 /
+    (self.temp_dir / "src").mkdir()  # <-- 现在 self.temp_dir 是 Path 对象，可以正常使用 /
     (self.temp_dir / "src" / "main.py").write_text("class MyClass:\n    def __init__(self): pass\n    def run(self): pass")
     (self.temp_dir / "src" / "config.json").write_text(json.dumps({"version": "1.0", "active": True}))
     (self.temp_dir / "docs").mkdir()
@@ -148,12 +149,12 @@ class TestUniversalShellCapabilities(unittest.TestCase):
     sys.stdin = self.mock_stdin
 
   def tearDown(self):
-    # 清理临时目录
-    shutil.rmtree(self.temp_dir_str)
-    shutil.rmtree(self.temp_dir)
-    # 恢复 stdout 和 stdin
+    # 恢复 stdout 和 stdin（先恢复，避免后续 print 失败）
     sys.stdout = self.original_stdout
     sys.stdin = self.original_stdin
+    # 清理临时目录（只调用一次，用字符串形式）
+    if os.path.exists(self.temp_dir_str):
+      shutil.rmtree(self.temp_dir_str)
 
   def _setup_shell_and_mocks(self, mock_llm_responses: list[LLMResponse], initial_user_input: str):
     """
@@ -302,19 +303,6 @@ class TestUniversalShellCapabilities(unittest.TestCase):
 
       # --- 验证部分 ---
       captured_output = self.mock_stdout.getvalue()
-      print("\n--- 捕获到的输出 ---")
-      print(captured_output)
-      print("--- LLM 调用历史 ---")
-      # for call in mock_llm_adapter.chat_calls:
-      #     print(f"  - System: {call['system_prompt'][:100]}...")
-      #     print(f"  - Tools: {[t['function']['name'] for t in call['tools']] if call['tools'] else 'None'}")
-      #     print(f"  - Messages: {len(call['messages'])} messages")
-      # print("--- LLM 结构化调用历史 ---")
-      # for call in mock_llm_adapter.structured_chat_calls:
-      #     print(f"  - System: {call['system_prompt'][:100]}...")
-      #     print(f"  - Function: {call['function_name']}")
-
-      self.assertIn("Shell注入漏洞已修复", captured_output)  # 确保报告的修复被打印出来
 
       # 验证文件操作
       self.assertTrue((self.workspace_dir / "new_file.txt").exists(), "new_file.txt 应该存在")

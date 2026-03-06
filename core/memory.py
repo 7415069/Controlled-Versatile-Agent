@@ -45,6 +45,95 @@ class MemoryStats:
   trim_count: int = 0
 
 
+@dataclass
+class TaskState:
+  """
+  结构化任务状态机（Active State Machine）。
+  是 Agent 的「工作记忆」，每轮注入 System Prompt，零 LLM 调用维护。
+  """
+  current_goal: str = ""
+  plan: List[str] = None
+  completed_steps: List[str] = None
+  active_step: str = ""
+  discovered_knowledge: Dict[str, str] = None
+  pending_risks: List[str] = None
+  iteration_at_plan: int = 0
+
+  def __post_init__(self):
+    if self.plan is None:
+      self.plan = []
+    if self.completed_steps is None:
+      self.completed_steps = []
+    if self.discovered_knowledge is None:
+      self.discovered_knowledge = {}
+    if self.pending_risks is None:
+      self.pending_risks = []
+
+  def update_from_plan(self, goal: str, milestones: List[str], iteration: int):
+    """从 submit_plan 的参数更新状态机"""
+    self.current_goal = goal
+    self.plan = milestones
+    self.active_step = milestones[0] if milestones else ""
+    self.iteration_at_plan = iteration
+    # 重置已完成步骤（新计划覆盖旧计划）
+    self.completed_steps = []
+
+  def mark_step_done(self, step_description: str):
+    """标记一个步骤完成，自动推进 active_step"""
+    if self.active_step and self.active_step not in self.completed_steps:
+      self.completed_steps.append(self.active_step)
+
+    # 推进到下一个未完成的步骤
+    for step in self.plan:
+      if step not in self.completed_steps:
+        self.active_step = step
+        return
+    self.active_step = ""  # 所有步骤完成
+
+  def add_knowledge(self, key: str, value: str):
+    """记录发现的关键事实"""
+    self.discovered_knowledge[key] = value
+
+  def add_risk(self, risk: str):
+    """记录识别到的风险"""
+    if risk not in self.pending_risks:
+      self.pending_risks.append(risk)
+
+  def to_prompt_block(self) -> str:
+    """生成紧凑的状态摘要，注入 System Prompt（约 150–250 tokens）"""
+    if not self.current_goal:
+      return ""
+
+    lines = [
+      "---",
+      "### 📋 当前任务状态 (TaskState)",
+      f"**目标**: {self.current_goal}",
+    ]
+
+    if self.plan:
+      plan_lines = []
+      for step in self.plan:
+        if step in self.completed_steps:
+          plan_lines.append(f"  - [x] {step}")
+        elif step == self.active_step:
+          plan_lines.append(f"  - [→] **{step}** ← 当前步骤")
+        else:
+          plan_lines.append(f"  - [ ] {step}")
+      lines.append("**计划**:\n" + "\n".join(plan_lines))
+
+    if self.discovered_knowledge:
+      kv = "; ".join(f"{k}: {v}" for k, v in list(self.discovered_knowledge.items())[-5:])
+      lines.append(f"**已知事实**: {kv}")
+
+    if self.pending_risks:
+      lines.append(f"**待处理风险**: {'; '.join(self.pending_risks[-3:])}")
+
+    progress = f"{len(self.completed_steps)}/{len(self.plan)}"
+    lines.append(f"**进度**: {progress} 步骤完成")
+    lines.append("---")
+    return "\n".join(lines)
+
+
 # ─── 核心类 ───────────────────────────────────────────────────
 
 class MemoryStore:
@@ -93,6 +182,9 @@ class MemoryStore:
     self._role_dir = os.path.join(memory_dir, _safe_name(role_name))
     os.makedirs(self._role_dir, exist_ok=True)
 
+    # ─── 增强：TaskState 状态机 ───
+    self._task_state = TaskState()
+
     # 加载或创建 session
     if session_id:
       self._session_id = session_id
@@ -129,8 +221,16 @@ class MemoryStore:
       self._update_stats()
       return MemoryStats(**asdict(self._stats))
 
+  def get_current_state(self) -> TaskState:
+    """返回当前任务状态机（供 shell.py 注入 System Prompt）"""
+    return self._task_state
+
+  def update_task_state(self, goal: str, milestones: List[str], iteration: int):
+    """由 submit_plan 工具调用成功后触发，更新状态机"""
+    self._task_state.update_from_plan(goal, milestones, iteration)
+
   def append(self, message: Dict):
-    """追加一条消息到内存和磁盘"""
+    """追加一条消息到内存和磁盘（增强：打重要性标签 + 增量 token 计数）"""
     if not message or not isinstance(message, dict):
       raise ValueError("消息必须是非空的字典")
 
@@ -138,19 +238,20 @@ class MemoryStore:
 
     with self._lock:
       try:
-        self._messages.append(message)
+        # ─── 增强：打重要性标签（规则引擎，零 LLM 调用）───
+        tagged_message = self._tag_importance(message)
+        self._messages.append(tagged_message)
 
         # 持久化
         if self._file and not self._file.closed:
-          json_line = json.dumps(message, ensure_ascii=False, separators=(',', ':'))
+          json_line = json.dumps(tagged_message, ensure_ascii=False, separators=(',', ':'))
           self._file.write(json_line + "\n")
           self._file.flush()
           os.fsync(self._file.fileno())
         else:
-          # 文件句柄异常，尝试重新打开
           self._open_file()
           if self._file:
-            json_line = json.dumps(message, ensure_ascii=False, separators=(',', ':'))
+            json_line = json.dumps(tagged_message, ensure_ascii=False, separators=(',', ':'))
             self._file.write(json_line + "\n")
             self._file.flush()
             os.fsync(self._file.fileno())
@@ -160,12 +261,16 @@ class MemoryStore:
         self._meta.updated_at = datetime.now(timezone.utc).isoformat()
         self._save_meta()
 
+        # ─── 增强：增量式 token 计数，立即更新缓存 ───
+        delta = self._count_tokens_single(tagged_message)
+        self._cached_token_estimate += delta
+        self._last_token_calc_time = time.time()
+
         # 检查是否需要截断
         self._maybe_trim()
 
         # 更新统计
         self._stats.total_messages += 1
-        self._last_token_calc_time = 0  # 强制重新计算token
 
       except Exception as e:
         self._meta.last_error = str(e)
@@ -173,7 +278,7 @@ class MemoryStore:
         raise
       finally:
         duration = time.time() - start_time
-        if duration > 0.1:  # 超过100ms记录警告
+        if duration > 0.1:
           print(f"[Memory] ⚠️  append操作耗时: {duration:.3f}s")
 
   def extend(self, messages: List[Dict]):
@@ -233,63 +338,114 @@ class MemoryStore:
     self._cleanup_resources()
 
   def token_estimate(self) -> int:
+    """返回当前 token 估算（增量维护，无需全量重算）"""
+    # 增量缓存有效时直接返回
     current_time = time.time()
     if (current_time - self._last_token_calc_time < self._TOKEN_CACHE_TTL and
         self._cached_token_estimate > 0):
       return self._cached_token_estimate
 
+    # 缓存过期或首次调用：全量精算并重置增量基线
     with self._lock:
       try:
         total = 0
         for m in self._messages:
-          content = m.get("content", "")
-          if isinstance(content, dict):
-            content = json.dumps(content, ensure_ascii=False)
-          msg_for_count = [{"role": m.get("role", "user"), "content": str(content)}]
-          total += token_counter(model=self._model, messages=msg_for_count)
+          total += self._count_tokens_single(m)
         self._cached_token_estimate = total
         self._last_token_calc_time = current_time
         return total
       except Exception as e:
-        print(f"[Memory] ⚠️ litellm token_counter 失败: {e}")
+        print(f"[Memory] ⚠️ token_counter 失败: {e}")
         return len(self._messages) * 120
 
+  def _count_tokens_single(self, message: Dict) -> int:
+    """计算单条消息的 token 数（用于增量维护）"""
+    try:
+      content = message.get("content", "")
+      if isinstance(content, (dict, list)):
+        content = json.dumps(content, ensure_ascii=False)
+      msg_for_count = [{"role": message.get("role", "user"), "content": str(content)}]
+      return token_counter(model=self._model, messages=msg_for_count)
+    except Exception:
+      # 降级估算：中文约 1.5 token/字，英文约 0.25 token/字
+      content_str = str(message.get("content", ""))
+      return max(4, len(content_str) // 3)
+
   def prepare_for_llm(self, keep_last_n: int = 3) -> List[Dict]:
-    """工业级消息脱水：活跃区原文 + 缓存区 Skeleton + 归档区折叠"""
+    """
+    增强版消息脱水：按重要性标签过滤，而非粗暴按位置截断。
+
+    标签策略：
+      ANCHOR  → 永远原文保留（submit_plan、人类最新指令）
+      DECISION→ 保留前 400 字符摘要
+      PROCESS → 活跃区（最后 keep_last_n*3 条）保留，归档区做 Skeleton
+      NOISE   → 直接丢弃
+    """
     raw_msgs = self.messages
-    dehydrated = []
     total_len = len(raw_msgs)
-    active_threshold = total_len - keep_last_n
-    archive_threshold = total_len - 10
+    active_boundary = total_len - (keep_last_n * 3)  # 活跃区范围扩大，避免切断工具链
+    result = []
 
     for i, msg in enumerate(raw_msgs):
-      new_msg = msg.copy()
-      if msg.get("role") != "tool":
-        dehydrated.append(new_msg)
+      tag = msg.get("_importance", "PROCESS")
+      role = msg.get("role", "")
+
+      # ─── ANCHOR：永久保留原文 ───
+      if tag == "ANCHOR":
+        clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+        result.append(clean)
         continue
 
-      content_str = msg.get("content", "")
-      try:
-        data = json.loads(content_str)
-        artifact = data.get("data", {})
-        if artifact.get("can_dehydrate") and artifact.get("artifact_type") == "file_content":
-          original_code = artifact.get("content", "")
-          path = artifact.get("metadata", {}).get("path", "unknown.py")
+      # ─── NOISE：直接丢弃 ───
+      if tag == "NOISE":
+        continue
 
-          if i < archive_threshold:
-            artifact["content"] = "[SYSTEM: 内容已过期折叠] 为节省 Token，此处代码全文已移除。如需再次查看，请重新调用 read_file。"
-            artifact["is_dehydrated"] = True
-          elif i < active_threshold:
-            skeleton = self._generate_semantic_skeleton(original_code, path)
-            artifact["content"] = f"[SYSTEM: 语义脱水] 该文件全文已转为结构大纲：\n\n{skeleton}"
-            artifact["is_skeleton"] = True
+      # ─── DECISION：保留摘要 ───
+      if tag == "DECISION":
+        clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+        content = clean.get("content", "")
+        if isinstance(content, str) and len(content) > 400:
+          clean = clean.copy()
+          clean["content"] = content[:400] + "\n[SYSTEM: 内容已摘要，如需原文请重新读取]"
+        result.append(clean)
+        continue
 
-          new_msg["content"] = json.dumps(data, ensure_ascii=False)
-      except (json.JSONDecodeError, TypeError, KeyError, json.decoder.JSONDecodeError):
-        pass  # 解析失败保留原文
+      # ─── PROCESS：按区域决定处理方式 ───
+      if role == "tool":
+        clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+        content_str = clean.get("content", "")
+        try:
+          data = json.loads(content_str)
+          artifact = data.get("data", {})
+          if artifact.get("can_dehydrate") and artifact.get("artifact_type") == "file_content":
+            original_code = artifact.get("content", "")
+            path = artifact.get("metadata", {}).get("path", "unknown.py")
 
-      dehydrated.append(new_msg)
-    return dehydrated
+            if i < active_boundary:
+              # 归档区：完全折叠
+              artifact["content"] = "[SYSTEM: 已归档] 内容已移除以节省 Token，如需查看请重新调用 read_file。"
+              artifact["is_dehydrated"] = True
+            else:
+              # 活跃区：Skeleton 化
+              skeleton = self._generate_semantic_skeleton(original_code, path)
+              artifact["content"] = f"[SYSTEM: 语义骨架]\n{skeleton}"
+              artifact["is_skeleton"] = True
+
+            clean["content"] = json.dumps(data, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError, KeyError):
+          pass
+        result.append(clean)
+      else:
+        # 非 tool 消息：活跃区保留，归档区折叠长内容
+        clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+        if i < active_boundary:
+          content = clean.get("content", "")
+          if isinstance(content, str) and len(content) > 300:
+            clean = clean.copy()
+            clean["content"] = content[:300] + "\n[SYSTEM: 已折叠]"
+        result.append(clean)
+
+    return result
 
   def _generate_semantic_skeleton(self, code: str, filename: str) -> str:
     if not code:
@@ -566,29 +722,129 @@ class MemoryStore:
         except OSError:
           pass
 
+  def _tag_importance(self, message: Dict) -> Dict:
+    """
+    规则引擎：为消息打重要性标签（零 LLM 调用）。
+    标签写入 _importance 字段（下划线前缀，prepare_for_llm 时自动剥离）。
+
+    ANCHOR  → 永远保留原文
+    DECISION→ 保留摘要（前 400 字符）
+    PROCESS → 按区域处理（活跃区 Skeleton，归档区折叠）
+    NOISE   → 直接丢弃
+    """
+    tagged = dict(message)
+    role = message.get("role", "")
+    content = message.get("content", "")
+    content_str = str(content) if not isinstance(content, str) else content
+
+    # ─── ANCHOR 规则 ───
+    # 1. 人类用户消息（始终是任务的起点和约束）
+    if role == "user":
+      tagged["_importance"] = "ANCHOR"
+      return tagged
+
+    # 2. assistant 调用了 submit_plan
+    if role == "assistant":
+      tool_calls = message.get("tool_calls", [])
+      if any(tc.get("function", {}).get("name") == "submit_plan"
+             for tc in tool_calls if isinstance(tc, dict)):
+        tagged["_importance"] = "ANCHOR"
+        return tagged
+
+    # 3. submit_plan 的工具返回结果
+    if role == "tool":
+      try:
+        data = json.loads(content_str)
+        # 通过 tool_call_id 无法直接知道工具名，用结果结构判断
+        if data.get("data", {}).get("status") == "PLAN_ACCEPTED":
+          tagged["_importance"] = "ANCHOR"
+          return tagged
+      except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # ─── NOISE 规则 ───
+    # 1. 空内容的 assistant 消息（纯 tool_call，无文本）
+    if role == "assistant" and not content_str.strip() and not message.get("tool_calls"):
+      tagged["_importance"] = "NOISE"
+      return tagged
+
+    # 2. tool 消息：重复的目录列表（内容含 list_directory 特征且已有更新的同类消息）
+    if role == "tool":
+      try:
+        data = json.loads(content_str)
+        inner_data = data.get("data", {})
+        if "summary_items" in inner_data or (
+            "entries" in inner_data and len(str(inner_data)) < 500
+        ):
+          # 短小的目录列表结果标记为 NOISE
+          tagged["_importance"] = "NOISE"
+          return tagged
+      except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # ─── DECISION 规则 ───
+    # 1. 有实质文本内容的 assistant 消息（分析、解释、错误诊断）
+    if role == "assistant" and len(content_str.strip()) > 50:
+      tagged["_importance"] = "DECISION"
+      return tagged
+
+    # 2. 工具执行出错的结果
+    if role == "tool":
+      try:
+        data = json.loads(content_str)
+        if data.get("status") == "error":
+          tagged["_importance"] = "DECISION"
+          return tagged
+      except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # ─── 默认：PROCESS ───
+    tagged["_importance"] = "PROCESS"
+    return tagged
+
   def _maybe_trim(self):
-    if len(self._messages) <= self._max_messages and self.token_estimate() <= self._max_token_budget:
+    """增强版截断：先检查增量 token 估算，触发时按重要性裁剪"""
+    if (len(self._messages) <= self._max_messages and
+        self._cached_token_estimate <= self._max_token_budget):
       return
 
-    # 找到一个安全的截断点：必须是 user 消息，且其后不能立即跟随 tool 角色
-    # 目标是确保不会切断 Assistant(tool_calls) -> Tool(result) 的序列
-    target_idx = len(self._messages) // 4
+    # 触发 trim：先做一次精确全量核算
+    accurate = sum(self._count_tokens_single(m) for m in self._messages)
+    self._cached_token_estimate = accurate
+    self._last_token_calc_time = time.time()
 
-    start_idx = 0
-    for i in range(target_idx, len(self._messages)):
-      msg = self._messages[i]
-      # 1. 必须是 user 角色
-      # 2. 确保不是 tool_result (我们在 adapter 修复了 role)
-      if msg.get("role") == "user":
-        # 检查下一条，确保不是在工具链中间
-        if i + 1 < len(self._messages) and self._messages[i + 1].get("role") == "tool":
-          continue
-        start_idx = i
-        break
+    if accurate <= self._max_token_budget and len(self._messages) <= self._max_messages:
+      return
 
-    if start_idx > 0:
-      print(f"[Memory] ✂️  安全截断：从第 {start_idx} 条开始保留")
-      self._messages = self._messages[start_idx:]
+    # 按重要性裁剪：优先丢弃 NOISE，再丢弃 PROCESS，保留 ANCHOR 和 DECISION
+    original_count = len(self._messages)
+
+    # 第一步：丢弃所有 NOISE
+    self._messages = [m for m in self._messages if m.get("_importance") != "NOISE"]
+
+    # 重新估算
+    self._cached_token_estimate = sum(self._count_tokens_single(m) for m in self._messages)
+
+    if (self._cached_token_estimate <= self._max_token_budget and
+        len(self._messages) <= self._max_messages):
+      print(f"[Memory] ✂️  NOISE 清理：{original_count} → {len(self._messages)} 条")
+      return
+
+    # 第二步：从最旧的 PROCESS 消息开始裁剪，保留最近 1/2
+    process_indices = [
+      i for i, m in enumerate(self._messages)
+      if m.get("_importance") == "PROCESS"
+    ]
+    # 保留后半段的 PROCESS，丢弃前半段
+    cutoff = len(process_indices) // 2
+    indices_to_remove = set(process_indices[:cutoff])
+    self._messages = [m for i, m in enumerate(self._messages) if i not in indices_to_remove]
+
+    self._cached_token_estimate = sum(self._count_tokens_single(m) for m in self._messages)
+    self._last_token_calc_time = time.time()
+    self._stats.trim_count += 1
+    self._stats.last_trim_time = time.time()
+    print(f"[Memory] ✂️  重要性裁剪：{original_count} → {len(self._messages)} 条")
 
   def _update_stats(self):
     """更新统计信息"""

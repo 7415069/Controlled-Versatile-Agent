@@ -839,7 +839,7 @@ TOOL_REGISTRY = {
   "search_files": SearchFilesTool,
   "http_request": HttpRequestTool,
   "submit_plan": SubmitPlanTool,
-  "execute_python": ExecutePythonTool,
+  "execute_python_script": ExecutePythonTool,
 }
 
 

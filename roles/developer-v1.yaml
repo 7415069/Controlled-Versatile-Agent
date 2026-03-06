@@ -77,7 +77,7 @@ capabilities:
   - search_files
   - http_request
   - submit_plan
-  - execute_python
+  - execute_python_script
 
 escalation_policy:
   auto_deny_patterns:
