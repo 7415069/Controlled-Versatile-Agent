@@ -20,6 +20,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from core.audit import AuditLogger
+from core.config import cvs_settings
 from core.escalation import EscalationManager, PreScreenResult
 from core.llm_adapter import (
   LLMAdapter,
@@ -85,7 +86,7 @@ class UniversalShell:
     # 性能优化：缓存脱水结果
     self._dehydration_cache: Dict[int, Dict] = {}
     self._last_dehydration_time = 0.0
-    self._DEHYDRATION_CACHE_TTL = 60.0  # 缓存60秒，减少重复计算
+    self._DEHYDRATION_CACHE_TTL = cvs_settings.memory_settings.dehydration_cache_ttl  # 缓存60秒，减少重复计算
 
   # ── 生命周期 ───────────────────────────────────────────────
 

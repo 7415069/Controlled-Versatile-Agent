@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Any
 
 from litellm import token_counter
 
+from core.config import cvs_settings
+
 
 # ─── 数据模型 ─────────────────────────────────────────────────
 
@@ -156,8 +158,8 @@ class MemoryStore:
       model: str = "deepseek/deepseek-chat"
   ):
     self._role_name = role_name
-    self._max_messages = max_messages
-    self._max_token_budget = max_token_budget
+    self._max_messages = max_messages or cvs_settings.memory_settings.default_max_messages
+    self._max_token_budget = max_token_budget or cvs_settings.memory_settings.default_token_budget
     self._model = model
 
     # 线程安全锁
@@ -172,7 +174,7 @@ class MemoryStore:
     self._stats = MemoryStats()
     self._last_token_calc_time = 0.0
     self._cached_token_estimate = 0
-    self._TOKEN_CACHE_TTL = 60.0  # 延长缓存时间到60秒
+    self._TOKEN_CACHE_TTL = cvs_settings.memory_settings.token_cache_ttl  # 延长缓存时间到60秒
 
     # 错误恢复
     self._corruption_detected = False

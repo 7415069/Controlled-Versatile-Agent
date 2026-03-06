@@ -50,6 +50,7 @@ class RoleManifest:
     "http_request",
     "submit_plan",
     "execute_python_script",
+    "get_repo_map"
   }
 
   def validate(self):

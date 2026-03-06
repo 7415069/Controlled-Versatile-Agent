@@ -88,7 +88,7 @@ CVA/
 ## 🚀 快速开始
 
 ### 1. 环境要求
-- Python 3.10+
+- Python 3.11+
 - 依赖（推荐使用 `requirements.txt`）：
   ```bash
   litellm
@@ -109,7 +109,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # 启动默认开发者角色
-python -m core.shell --manifest roles/developer-v1.yaml
+python cv_agent.py --manifest roles/code-reviewer-sample-v1.yaml --model deepseek/deepseek-chat
 ```
 
 启动后直接在终端输入任务，Agent 将自动规划、申请权限并执行工具。

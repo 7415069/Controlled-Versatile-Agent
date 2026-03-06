@@ -7,12 +7,15 @@
 - 降低默认文件读取限制：50000 -> 30000字符，节省token
 """
 import glob as glob_module
+import json
 import os
 import shlex
 import subprocess
 import sys
 import time
 from typing import Any, Callable, Dict, Optional
+
+from core.config import cvs_settings
 
 
 # ─── 工具返回值规范 ──────────────────────────────────────────
@@ -94,9 +97,9 @@ class FindSymbolTool(Tool):
     # 遍历项目（复用之前的安全路径逻辑）
     for root, dirs, files in os.walk("."):
       # 排除干扰目录
-      dirs[:] = [d for d in dirs if not d.startswith(('.', '__pycache__', 'node_modules'))]
+      dirs[:] = [d for d in dirs if not d.startswith(cvs_settings.tool_settings.find_symbol_skip_start_with)]
       for file in files:
-        if not file.endswith(('.py', '.js', '.ts', '.go', '.java', '.cpp')):
+        if not file.endswith(cvs_settings.tool_settings.find_symbol_skip_end_with):
           continue
 
         path = os.path.join(root, file)
@@ -149,7 +152,7 @@ class GetProjectSummaryTool(Tool):
       try:
         # Fix 3: sorted() 对 DirEntry 排序必须指定 key，否则抛 TypeError 被静默吞掉导致返回空列表
         for entry in sorted(os.scandir(current_dir_path), key=lambda e: e.name):
-          if entry.name.startswith(('.', '__pycache__', 'node_modules', 'venv', 'logs', 'temp_backup')):
+          if entry.name.startswith(cvs_settings.tool_settings.project_summary_skip_files):
             continue
 
           full_entry_path = entry.path
@@ -329,8 +332,8 @@ class ReadFileTool(Tool):
     "required": ["path", "reason"],
   }
 
-  MAX_PHYSICAL_FILE_SIZE = 100 * 1024 * 1024
-  MAX_RETURNED_CONTENT_CHARS = 30000
+  MAX_PHYSICAL_FILE_SIZE = cvs_settings.tool_settings.read_max_physical_file_size
+  MAX_RETURNED_CONTENT_CHARS = cvs_settings.tool_settings.read_max_returned_content_chars
 
   def execute(self, path: str, start_line: int = 1, end_line: Optional[int] = None,
       encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
@@ -446,7 +449,7 @@ class WriteFileTool(Tool):
   }
 
   # 内容大小限制常量
-  MAX_CONTENT_SIZE = 50 * 1024 * 1024  # 50MB
+  MAX_CONTENT_SIZE = cvs_settings.tool_settings.write_max_content_size  # 50MB
 
   def execute(self, path: str, content: str, encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -497,7 +500,7 @@ class AppendFileTool(Tool):
   }
 
   # 内容大小限制常量
-  MAX_APPEND_SIZE = 10 * 1024 * 1024  # 10MB
+  MAX_APPEND_SIZE = cvs_settings.tool_settings.append_max_append_size  # 10MB
 
   def execute(self, path: str, content: str, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -537,9 +540,9 @@ class RunShellTool(Tool):
   }
 
   # 命令限制常量
-  MAX_COMMAND_LENGTH = 10000
-  MAX_ARGS_COUNT = 100
-  MAX_TIMEOUT = 300
+  MAX_COMMAND_LENGTH = cvs_settings.tool_settings.shell_max_command_length
+  MAX_ARGS_COUNT = cvs_settings.tool_settings.shell_max_args_count
+  MAX_TIMEOUT = cvs_settings.tool_settings.shell_max_timeout
 
   def execute(self, command: str, timeout: int = 30, cwd: Optional[str] = None, reason: str = "", **kwargs) -> Dict | None:
     allowed, msg = self._check(self.name, command, "shell", reason, self._ctx(kwargs))
@@ -583,7 +586,7 @@ class RunShellTool(Tool):
         return ok({
           "stdout": result.stdout,
           "stderr": result.stderr,
-          "returncode": result.returncode,
+          "return_code": result.returncode,
           "command": command,
           "args": args,
         })
@@ -644,9 +647,9 @@ class SearchFilesTool(Tool):
   }
 
   # 搜索限制常量
-  MAX_MATCHES = 200
-  MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-  PROGRESS_INTERVAL = 50  # 每处理50个文件输出一次进度
+  MAX_MATCHES = cvs_settings.tool_settings.search_max_matches
+  MAX_FILE_SIZE = cvs_settings.tool_settings.search_max_file_size  # 10MB
+  PROGRESS_INTERVAL = cvs_settings.tool_settings.progress_interval  # 每处理50个文件输出一次进度
 
   def execute(self, pattern: str, path: str = ".",
       search_content: bool = False, reason: str = "", **kwargs) -> Dict:
@@ -731,10 +734,9 @@ class HttpRequestTool(Tool):
     },
     "required": ["url", "method"],
   }
-
   # 请求限制常量
-  MAX_TIMEOUT = 60
-  MAX_BODY_SIZE = 10000
+  MAX_TIMEOUT = cvs_settings.tool_settings.max_timeout
+  MAX_BODY_SIZE = cvs_settings.tool_settings.max_body_size
 
   def execute(self, url: str, method: str = "GET", headers: dict = None,
       body: str = None, timeout: int = 15, reason: str = "", **kwargs) -> Dict:
@@ -824,6 +826,89 @@ class ExecutePythonScriptTool(Tool):
         os.remove(tmp_path)
 
 
+class GetRepoMapTool(Tool):
+  name = "get_repo_map"
+  description = "【项目语义地图】利用系统级 ctags 引擎生成整个项目的符号索引（类、函数、接口、宏）。在处理大型项目、查找跨文件定义、理解代码架构时必用。比 list_directory 更省 Token 且包含语义信息。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "起始目录", "default": "."},
+      "reason": {"type": "string", "description": "调用原因"}
+    }
+  }
+
+  def execute(self, path: str = ".", reason: str = "", **kwargs) -> Dict:
+    # 1. 权限检查 (复用你的 CVA 权限检查器)
+    allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    real_path = self._secure_path(path)
+    if not real_path or not os.path.exists(real_path):
+      return err("INVALID_PATH", f"路径不存在: {path}")
+
+    # 2. 调用系统 ctags (确保你已执行 sudo pacman -S ctags)
+    # --fields=+n+S: 包含行号和函数签名
+    cmd = cvs_settings.tool_settings.repo_map_cmd + [real_path]
+
+    try:
+      result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+      if result.returncode != 0:
+        return err("CTAGS_ERROR", result.stderr or "未知 ctags 错误")
+
+      # 3. 数据解析与聚合
+      tags_by_file = {}
+      for line in result.stdout.splitlines():
+        if not line.strip():
+          continue
+        try:
+          tag = json.loads(line)
+          fpath = tag.get("path")
+          if not fpath:
+            continue
+          if fpath not in tags_by_file:
+            tags_by_file[fpath] = []
+          tags_by_file[fpath].append(tag)
+        except:
+          continue
+
+      # 4. 生成“压缩大纲”格式 (AI 最容易理解的格式)
+      repo_map = []
+      for fpath in sorted(tags_by_file.keys()):
+        rel_fpath = os.path.relpath(fpath, real_path)
+        repo_map.append(f"file: {rel_fpath}")
+
+        # 按行号排序
+        tags = sorted(tags_by_file[fpath], key=lambda x: x.get("line", 0))
+        for t in tags:
+          kind, name, sign, line = t.get("kind"), t.get("name"), t.get("signature", ""), t.get("line", 0)
+          if kind in ("variable", "local", "parameter"):
+            continue  # 过滤局部变量
+
+          indent = "  "
+          if kind in ("method", "member", "field"):
+            indent = "    "
+          repo_map.append(f"{indent}{kind} {name}{sign} [line:{line}]")
+        repo_map.append("")
+
+      final_text = "\n".join(repo_map)
+
+      # 5. Token 保护
+      if len(final_text) > 20000:
+        final_text = final_text[:20000] + "\n\n... [地图过长，已截断]"
+
+      return ok({
+        "map": final_text,
+        "total_files": len(tags_by_file),
+        "info": "使用 ctags 成功生成语义索引"
+      })
+
+    except FileNotFoundError:
+      return err("SYSTEM_ERROR", "未找到 ctags 二进制文件。请安装 ctags (如: pacman -S ctags)")
+    except Exception as e:
+      return err("RUNTIME_ERROR", str(e))
+
+
 # ─── 工具注册表 ───────────────────────────────────────────────
 
 TOOL_REGISTRY = {
@@ -841,6 +926,7 @@ TOOL_REGISTRY = {
   "http_request": HttpRequestTool,
   "submit_plan": SubmitPlanTool,
   "execute_python_script": ExecutePythonScriptTool,
+  "get_repo_map": GetRepoMapTool
 }
 
 
