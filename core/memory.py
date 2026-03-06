@@ -78,6 +78,18 @@ class TaskState:
     # 重置已完成步骤（新计划覆盖旧计划）
     self.completed_steps = []
 
+  def mark_step_done(self, step_description: str):
+    """标记一个步骤完成，自动推进 active_step"""
+    if self.active_step and self.active_step not in self.completed_steps:
+      self.completed_steps.append(self.active_step)
+
+    # 推进到下一个未完成的步骤
+    for step in self.plan:
+      if step not in self.completed_steps:
+        self.active_step = step
+        return
+    self.active_step = ""  # 所有步骤完成
+
   def add_knowledge(self, key: str, value: str):
     """记录发现的关键事实"""
     self.discovered_knowledge[key] = value
@@ -94,6 +106,36 @@ class TaskState:
 
     lines = [
       "---",
+      "### 📋 当前任务状态 (TaskState)",
+      f"**目标**: {self.current_goal}",
+    ]
+
+    if self.plan:
+      plan_lines = []
+      for step in self.plan:
+        if step in self.completed_steps:
+          plan_lines.append(f"  - [x] {step}")
+        elif step == self.active_step:
+          plan_lines.append(f"  - [→] **{step}** ← 当前步骤")
+        else:
+          plan_lines.append(f"  - [ ] {step}")
+      lines.append("**计划**:\n" + "\n".join(plan_lines))
+
+    if self.discovered_knowledge:
+      kv = "; ".join(f"{k}: {v}" for k, v in list(self.discovered_knowledge.items())[-5:])
+      lines.append(f"**已知事实**: {kv}")
+
+    if self.pending_risks:
+      lines.append(f"**待处理风险**: {'; '.join(self.pending_risks[-3:])}")
+
+    progress = f"{len(self.completed_steps)}/{len(self.plan)}"
+    lines.append(f"**进度**: {progress} 步骤完成")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+# ─── 核心类 ───────────────────────────────────────────────────
+
 class MemoryStore:
   """
   跨 session 持久化对话历史。
@@ -280,6 +322,16 @@ class MemoryStore:
         duration = time.time() - start_time
         if duration > 0.5:  # 超过500ms记录警告
           print(f"[Memory] ⚠️  extend操作耗时: {duration:.3f}s")
+
+  def flush(self):
+    """强制刷盘"""
+    with self._file_lock:
+      if self._file and not self._file.closed:
+        try:
+          self._file.flush()
+          os.fsync(self._file.fileno())
+        except Exception as e:
+          print(f"[Memory] ⚠️  刷盘失败: {e}")
 
   def close(self):
     """关闭内存存储，释放资源"""
@@ -516,6 +568,11 @@ class MemoryStore:
         raw["sessions"] = [s for s in raw["sessions"] if s["session_id"] != session_id]
         with open(index_path, "w", encoding="utf-8") as f:
           json.dump(raw, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+      print(f"[Memory] ⚠️  删除session失败: {e}")
+
+  # ─── 私有方法 ─────────────────────────────────────────────
+
   def _open_file(self):
     """安全地打开文件句柄"""
     with self._file_lock:
