@@ -15,7 +15,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional
 
-from core.config import cvs_settings
+from core.config import cva_settings
 
 
 # ─── 工具返回值规范 ──────────────────────────────────────────
@@ -97,9 +97,9 @@ class FindSymbolTool(Tool):
     # 遍历项目（复用之前的安全路径逻辑）
     for root, dirs, files in os.walk("."):
       # 排除干扰目录
-      dirs[:] = [d for d in dirs if not d.startswith(cvs_settings.tool_settings.find_symbol_skip_start_with)]
+      dirs[:] = [d for d in dirs if not d.startswith(cva_settings.tool_settings.find_symbol_skip_start_with)]
       for file in files:
-        if not file.endswith(cvs_settings.tool_settings.find_symbol_skip_end_with):
+        if not file.endswith(cva_settings.tool_settings.find_symbol_skip_end_with):
           continue
 
         path = os.path.join(root, file)
@@ -152,7 +152,7 @@ class GetProjectSummaryTool(Tool):
       try:
         # Fix 3: sorted() 对 DirEntry 排序必须指定 key，否则抛 TypeError 被静默吞掉导致返回空列表
         for entry in sorted(os.scandir(current_dir_path), key=lambda e: e.name):
-          if entry.name.startswith(cvs_settings.tool_settings.project_summary_skip_files):
+          if entry.name.startswith(cva_settings.tool_settings.project_summary_skip_files):
             continue
 
           full_entry_path = entry.path
@@ -332,8 +332,8 @@ class ReadFileTool(Tool):
     "required": ["path", "reason"],
   }
 
-  MAX_PHYSICAL_FILE_SIZE = cvs_settings.tool_settings.read_max_physical_file_size
-  MAX_RETURNED_CONTENT_CHARS = cvs_settings.tool_settings.read_max_returned_content_chars
+  MAX_PHYSICAL_FILE_SIZE = cva_settings.tool_settings.read_max_physical_file_size
+  MAX_RETURNED_CONTENT_CHARS = cva_settings.tool_settings.read_max_returned_content_chars
 
   def execute(self, path: str, start_line: int = 1, end_line: Optional[int] = None,
       encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
@@ -449,7 +449,7 @@ class WriteFileTool(Tool):
   }
 
   # 内容大小限制常量
-  MAX_CONTENT_SIZE = cvs_settings.tool_settings.write_max_content_size  # 50MB
+  MAX_CONTENT_SIZE = cva_settings.tool_settings.write_max_content_size  # 50MB
 
   def execute(self, path: str, content: str, encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -500,7 +500,7 @@ class AppendFileTool(Tool):
   }
 
   # 内容大小限制常量
-  MAX_APPEND_SIZE = cvs_settings.tool_settings.append_max_append_size  # 10MB
+  MAX_APPEND_SIZE = cva_settings.tool_settings.append_max_append_size  # 10MB
 
   def execute(self, path: str, content: str, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -540,9 +540,9 @@ class RunShellTool(Tool):
   }
 
   # 命令限制常量
-  MAX_COMMAND_LENGTH = cvs_settings.tool_settings.shell_max_command_length
-  MAX_ARGS_COUNT = cvs_settings.tool_settings.shell_max_args_count
-  MAX_TIMEOUT = cvs_settings.tool_settings.shell_max_timeout
+  MAX_COMMAND_LENGTH = cva_settings.tool_settings.shell_max_command_length
+  MAX_ARGS_COUNT = cva_settings.tool_settings.shell_max_args_count
+  MAX_TIMEOUT = cva_settings.tool_settings.shell_max_timeout
 
   def execute(self, command: str, timeout: int = 30, cwd: Optional[str] = None, reason: str = "", **kwargs) -> Dict | None:
     allowed, msg = self._check(self.name, command, "shell", reason, self._ctx(kwargs))
@@ -647,9 +647,9 @@ class SearchFilesTool(Tool):
   }
 
   # 搜索限制常量
-  MAX_MATCHES = cvs_settings.tool_settings.search_max_matches
-  MAX_FILE_SIZE = cvs_settings.tool_settings.search_max_file_size  # 10MB
-  PROGRESS_INTERVAL = cvs_settings.tool_settings.progress_interval  # 每处理50个文件输出一次进度
+  MAX_MATCHES = cva_settings.tool_settings.search_max_matches
+  MAX_FILE_SIZE = cva_settings.tool_settings.search_max_file_size  # 10MB
+  PROGRESS_INTERVAL = cva_settings.tool_settings.progress_interval  # 每处理50个文件输出一次进度
 
   def execute(self, pattern: str, path: str = ".",
       search_content: bool = False, reason: str = "", **kwargs) -> Dict:
@@ -735,8 +735,8 @@ class HttpRequestTool(Tool):
     "required": ["url", "method"],
   }
   # 请求限制常量
-  MAX_TIMEOUT = cvs_settings.tool_settings.max_timeout
-  MAX_BODY_SIZE = cvs_settings.tool_settings.max_body_size
+  MAX_TIMEOUT = cva_settings.tool_settings.max_timeout
+  MAX_BODY_SIZE = cva_settings.tool_settings.max_body_size
 
   def execute(self, url: str, method: str = "GET", headers: dict = None,
       body: str = None, timeout: int = 15, reason: str = "", **kwargs) -> Dict:
@@ -849,7 +849,7 @@ class GetRepoMapTool(Tool):
 
     # 2. 调用系统 ctags (确保你已执行 sudo pacman -S ctags)
     # --fields=+n+S: 包含行号和函数签名
-    cmd = cvs_settings.tool_settings.repo_map_cmd + [real_path]
+    cmd = cva_settings.tool_settings.repo_map_cmd + [real_path]
 
     try:
       result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

@@ -18,6 +18,7 @@ from typing import List, Dict, Optional, Union
 
 import pathspec
 
+from core.config import cva_settings
 from core.manifest import Permissions
 
 
@@ -77,7 +78,7 @@ class PermissionChecker:
     # 权限变更历史（审计用）
     self._permission_history: List[Dict] = []
 
-    os.makedirs('./agent_workspace', exist_ok=True)
+    os.makedirs(cva_settings.agent_dir, exist_ok=True)
 
   # ─── pathspec 核心 ────────────────────────────────────────
 

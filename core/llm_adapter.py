@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, TypeVar, cast, Any
 import litellm
 from litellm import completion
 
-from core.config import cvs_settings
+from core.config import cva_settings
 from core.logger import trace_logger
 
 logger = logging.getLogger(__name__)
@@ -72,15 +72,15 @@ class LLMAdapter:
   def __init__(self, model: str, **kwargs):
     self._model = model
     self._extra_kwargs = kwargs
-    self._max_retries = kwargs.pop('max_retries', cvs_settings.llm_settings.max_retries)
-    self._retry_delay = kwargs.pop('retry_delay', cvs_settings.llm_settings.retry_delay)
-    self._timeout = kwargs.pop('timeout', cvs_settings.llm_settings.timeout)
+    self._max_retries = kwargs.pop('max_retries', cva_settings.llm_settings.max_retries)
+    self._retry_delay = kwargs.pop('retry_delay', cva_settings.llm_settings.retry_delay)
+    self._timeout = kwargs.pop('timeout', cva_settings.llm_settings.timeout)
     self._lock = threading.RLock()
     self._stats = CallStats()
 
     # ─── 核心修改：调大输入上限以配合底座脱水 ───
-    self._max_input_length = kwargs.pop('max_input_length', cvs_settings.llm_settings.max_input_length)
-    self._max_output_tokens = kwargs.pop('max_output_tokens', cvs_settings.llm_settings.max_output_tokens)
+    self._max_input_length = kwargs.pop('max_input_length', cva_settings.llm_settings.max_input_length)
+    self._max_output_tokens = kwargs.pop('max_output_tokens', cva_settings.llm_settings.max_output_tokens)
 
   @property
   def model(self) -> str:

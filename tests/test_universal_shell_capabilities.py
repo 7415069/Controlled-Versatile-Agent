@@ -176,7 +176,7 @@ class TestUniversalShellCapabilities(unittest.TestCase):
     shell = UniversalShell(
         manifest_path=str(self.manifest_path),
         model="mock-model",
-        log_dir=str(self.log_dir),
+        audit_log_dir=str(self.log_dir),
         memory_dir=str(self.memory_dir),
         session_id="test_session_123",
         max_iterations=len(mock_llm_responses) + 2,  # 足够多的迭代次数

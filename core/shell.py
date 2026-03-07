@@ -11,6 +11,7 @@
 """
 
 import json
+import os
 import sys
 import textwrap
 import threading
@@ -20,7 +21,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from core.audit import AuditLogger
-from core.config import cvs_settings
+from core.config import cva_settings
 from core.escalation import EscalationManager, PreScreenResult
 from core.llm_adapter import (
   LLMAdapter,
@@ -43,8 +44,8 @@ class UniversalShell:
       self,
       manifest_path: str,
       model: str = "claude-opus-4-5",
-      log_dir: str = "./audit-logs",
-      memory_dir: str = "./memory",
+      audit_log_dir: str = cva_settings.audit_settings.log_dir,
+      memory_dir: str = cva_settings.memory_settings.data_dir,
       session_id: Optional[str] = None,
       max_iterations: int = 100,
       max_memory_messages: int = 200,
@@ -59,7 +60,7 @@ class UniversalShell:
     self._use_gui = use_gui
 
     self._manifest: RoleManifest = load_manifest(manifest_path)
-    self._logger = AuditLogger(log_dir, self._instance_id, self._manifest.role_name)
+    self._logger = AuditLogger(audit_log_dir, self._instance_id, self._manifest.role_name)
     self._perm = PermissionChecker(self._manifest.init_permissions)
 
     self._escalation = EscalationManager(
@@ -72,6 +73,8 @@ class UniversalShell:
 
     self._llm = LLMAdapter(model=model)
     self._escalation.set_llm_call_fn(self._make_pre_screen_call)
+
+    os.makedirs(memory_dir, exist_ok=True)
 
     self._memory = MemoryStore(
         memory_dir=memory_dir,
@@ -86,7 +89,7 @@ class UniversalShell:
     # 性能优化：缓存脱水结果
     self._dehydration_cache: Dict[int, Dict] = {}
     self._last_dehydration_time = 0.0
-    self._DEHYDRATION_CACHE_TTL = cvs_settings.memory_settings.dehydration_cache_ttl  # 缓存60秒，减少重复计算
+    self._DEHYDRATION_CACHE_TTL = cva_settings.memory_settings.dehydration_cache_ttl  # 缓存60秒，减少重复计算
 
   # ── 生命周期 ───────────────────────────────────────────────
 

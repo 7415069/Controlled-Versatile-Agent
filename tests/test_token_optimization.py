@@ -61,7 +61,7 @@ escalation_policy:
     shell = UniversalShell(
         manifest_path=str(temp_manifest_path),
         model='claude-opus-4-5',
-        log_dir=str(log_dir),
+        audit_log_dir=str(log_dir),
         memory_dir=str(memory_dir),
     )
 

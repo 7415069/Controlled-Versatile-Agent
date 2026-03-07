@@ -20,6 +20,7 @@ def get_env(key: str, default: Any, cast_type: type = str):
 
 @dataclass
 class LLMSettings:
+  log_dir: str = field(default_factory=lambda: get_env("LLM_LOG_DIR", "var/logs/llm"))
   default_model: str = field(default_factory=lambda: get_env("LLM_DEFAULT_MODEL", "deepseek/deepseek-chat"))
   max_retries: int = field(default_factory=lambda: get_env("LLM_MAX_RETRIES", 3, int))
   retry_delay: float = field(default_factory=lambda: get_env("LLM_RETRY_DELAY", 1.0, float))
@@ -30,6 +31,7 @@ class LLMSettings:
 
 @dataclass
 class MemorySettings:
+  data_dir: str = field(default_factory=lambda: get_env("MEMORY_DATA_DIR", "var/data/memory"))
   token_cache_ttl: float = field(default_factory=lambda: get_env("MEMORY_TOKEN_CACHE_TTL", 60.0, float))
   dehydration_cache_ttl: float = field(default_factory=lambda: get_env("MEMORY_DEHYDRATION_CACHE_TTL", 60.0, float))
   default_max_messages: int = field(default_factory=lambda: get_env("MEMORY_DEFAULT_MAX_MESSAGES", 200, int))
@@ -107,6 +109,7 @@ class SecuritySettings:
 
 @dataclass
 class AuditSettings:
+  log_dir: str = field(default_factory=lambda: get_env("AUDIT_LOG_DIR", "var/logs/audit", str))
   max_log_size: int = field(default_factory=lambda: get_env("AUDIT_MAX_LOG_SIZE", 100 * 1024 * 1024, int))  # 100MB
   max_log_age_days: int = field(default_factory=lambda: get_env("AUDIT_MAX_LOG_AGE_DAYS", 30, int))
   cleanup_interval_seconds: int = field(default_factory=lambda: get_env("AUDIT_CLEANUP_INTERVAL_SECONDS", 300, int))  # 5分钟清理一次过期权限
@@ -114,6 +117,7 @@ class AuditSettings:
 
 @dataclass
 class CvaSettings:
+  agent_dir: str = field(default_factory=lambda: get_env("AGENT_DIR", "var/agent"))
   llm_settings: LLMSettings = field(default_factory=LLMSettings)
   memory_settings: MemorySettings = field(default_factory=MemorySettings)
   tool_settings: ToolSettings = field(default_factory=ToolSettings)
@@ -122,4 +126,4 @@ class CvaSettings:
 
 
 # 全局单例
-cvs_settings = CvaSettings()
+cva_settings = CvaSettings()

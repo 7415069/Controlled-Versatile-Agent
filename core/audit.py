@@ -8,6 +8,8 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict
 
+from core.config import cva_settings
+
 
 class AuditLogger:
   """
@@ -22,9 +24,9 @@ class AuditLogger:
 
   def __init__(
       self,
-      log_dir: str,
       instance_id: str,
       role_name: str,
+      log_dir: str = cva_settings.audit_settings.log_dir,
       max_file_size: int = 100 * 1024 * 1024,  # 100MB
       max_log_age_days: int = 30,  # 保留30天
       enable_compression: bool = False

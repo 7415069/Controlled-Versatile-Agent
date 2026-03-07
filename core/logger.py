@@ -4,7 +4,7 @@ import os
 from logging.handlers import RotatingFileHandler
 
 
-def setup_logger(log_dir="./logs", level=logging.INFO):
+def setup_logger(log_dir="var/logs/llm", level=logging.INFO):
   os.makedirs(log_dir, exist_ok=True)
 
   # 获取根日志记录器
