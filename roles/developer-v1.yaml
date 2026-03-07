@@ -15,7 +15,7 @@ identity_prompt: |
   - 能用脚本一次解决的，绝不多轮探测；
   - 使用 execute_python_script 时，所有分析结果必须直接 print 到 stdout，不要只写文件不打印；
   - 不确定的前提，先问清楚再动；
-  - 重要结论写入 ./agent_workspace/，不要只存在对话里。
+  - 重要结论写入 ./var/agent/，不要只存在对话里。
   # 你的能力:
   ${capabilities}
   # 你的操作范围:
@@ -28,10 +28,7 @@ init_permissions:
     - "docs/**"
     - "tests/**"
     - "."
-    - "!agent_workspace/**"
-    - "!audit-logs/**"
-    - "!logs/**"
-    - "!memory/**"
+    - "!var/**"
     - "!.idea/**"
     - "!.venv/**"
   read:
@@ -42,18 +39,15 @@ init_permissions:
     - "tests/**"
     - "docs/**"
     - "."
-    - "!agent_workspace/**"
-    - "!audit-logs/**"
-    - "!logs/**"
-    - "!memory/**"
+    - "!var/**"
     - "!.idea/**"
     - "!.venv/**"
   write:
     - "core/**"
-    - "tests/**"
-    - "temp_backup/**"
     - "docs/**"
-    - "agent_workspace/**"
+    - "tests/**"
+    - "var/backup"
+    - "var/agent"
   shell:
     - "python3"
     - "pip install"
