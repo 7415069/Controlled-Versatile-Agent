@@ -60,7 +60,7 @@ class UniversalShell:
     self._use_gui = use_gui
 
     self._manifest: RoleManifest = load_manifest(manifest_path)
-    self._logger = AuditLogger(audit_log_dir, self._instance_id, self._manifest.role_name)
+    self._logger = AuditLogger(self._instance_id, self._manifest.role_name, audit_log_dir)
     self._perm = PermissionChecker(self._manifest.init_permissions)
 
     self._escalation = EscalationManager(
@@ -94,6 +94,8 @@ class UniversalShell:
   # ── 生命周期 ───────────────────────────────────────────────
 
   def start(self):
+    os.makedirs(cva_settings.audit_settings.log_dir, exist_ok=True)
+
     self._start_time = time.time()
     self._print_banner()
 
@@ -136,7 +138,7 @@ class UniversalShell:
 
   def _run_loop(self):
     consecutive_failures = 0
-    MAX_CONSECUTIVE_FAILURES = 3
+    MAX_RETRIES = cva_settings.llm_settings.max_retries
 
     sys_logger.info(f"开始任务循环。Session ID: {self._memory.session_id}")
     while self._iteration < self._max_iterations:
@@ -172,8 +174,8 @@ class UniversalShell:
       if response.finish_reason == "error":
         print(f"[CVA] ❌ LLM 错误: {response.text}")
         consecutive_failures += 1
-        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-          print(f"[CVA] ❌ 连续 {MAX_CONSECUTIVE_FAILURES} 次失败，停止运行")
+        if consecutive_failures >= MAX_RETRIES:
+          print(f"[CVA] ❌ 连续 {MAX_RETRIES} 次失败，停止运行")
           break
         continue
 
