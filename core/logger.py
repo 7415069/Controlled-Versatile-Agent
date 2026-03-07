@@ -9,7 +9,7 @@ def setup_logger(log_dir="./logs", level=logging.INFO):
 
   # 获取根日志记录器
   logger = logging.getLogger("CVA")
-  logger.setLevel(logging.DEBUG)  # 允许所有级别，由 handler 过滤
+  logger.setLevel(logging.INFO)  # 允许所有级别，由 handler 过滤
 
   # 防止重复添加 handler
   if logger.handlers:
@@ -25,13 +25,13 @@ def setup_logger(log_dir="./logs", level=logging.INFO):
   # 2. 系统运行日志 - 详细记录
   system_file = os.path.join(log_dir, "system.log")
   file_handler = RotatingFileHandler(system_file, maxBytes=10 * 1024 * 1024, backupCount=5)
-  file_handler.setLevel(logging.DEBUG)
+  file_handler.setLevel(logging.INFO)
   file_handler.setFormatter(formatter)
 
   # 3. LLM 原始载荷日志 (Trace 专用)
   trace_file = os.path.join(log_dir, "llm_trace.log")
-  trace_handler = RotatingFileHandler(trace_file, maxBytes=20 * 1024 * 1024, backupCount=3)
-  trace_handler.setLevel(logging.DEBUG)  # 我们把 Trace 映射到 DEBUG
+  trace_handler = RotatingFileHandler(trace_file, maxBytes=20 * 1024 * 1024, backupCount=5)
+  trace_handler.setLevel(logging.INFO)  # 我们把 Trace 映射到 DEBUG
   trace_handler.setFormatter(formatter)
 
   # 为不同模块设置过滤（可选）
