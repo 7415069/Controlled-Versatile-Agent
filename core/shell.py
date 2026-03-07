@@ -1,13 +1,15 @@
 """
-统一底座（Universal Shell）v3.5 - Token优化版
-优化内容：
-- 消息脱水性能优化：缓存解析结果，减少重复计算
-- Token估算优化：增加缓存时间，减少计算频率
-- 工具执行失败处理：改进错误处理逻辑
-- 脱水缓存时间延长：10秒 -> 60秒
-- 保留消息数减少：4条 -> 3条
-- 脱水触发阈值降低：2000字符 -> 1000字符
-- System Prompt简化：减少权限列表冗余
+统一底座（Universal Shell）v3.6
+
+修复内容：
+  P2-6: _periodic_cleanup 是永不退出的 daemon 线程，stop() 没有通知它退出的机制。
+        多次实例化 UniversalShell（如测试场景）会积累孤立线程。
+        → 使用 threading.Event(_stop_event) 优雅停止清理线程。
+  串联修复：
+        - build_tools() 传入 self._safe_input 作为 input_fn（修复 AskHumanTool 裸input）
+        - EscalationManager 传入 input_fn=self._safe_input（修复 console_approval 裸input）
+        - EscalationManager 接受 gui_approval_fn（修复子线程创建 Tkinter）
+        - shell.py 本身不直接调用 tkinter，由 cv_agent.py 主线程注入 gui_approval_fn
 """
 
 import json
@@ -18,7 +20,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from core.audit import AuditLogger
 from core.config import cva_settings
@@ -36,9 +38,7 @@ from core.tool import build_tools
 
 
 class UniversalShell:
-  """
-  CVA 唯一的业务无关运行时 v3.4。
-  """
+  """CVA 唯一的业务无关运行时 v3.6"""
 
   def __init__(
       self,
@@ -50,14 +50,18 @@ class UniversalShell:
       max_iterations: int = 100,
       max_memory_messages: int = 200,
       max_token_budget: int = 80000,
-      use_gui: bool = True,
+      # 修复 P0-3：接受主线程弹窗回调，而非 use_gui 布尔值
+      # GUI 模式由 cv_agent.py 在 _run_agent 里注入，CLI 模式传 None
+      gui_approval_fn: Optional[Callable] = None,
   ):
     self._instance_id = str(uuid.uuid4())
     self._model = model
     self._max_iterations = max_iterations
     self._iteration = 0
     self._start_time = None
-    self._use_gui = use_gui
+
+    # 修复 P2-6：停止事件，用于优雅退出 cleanup 线程
+    self._stop_event = threading.Event()
 
     self._manifest: RoleManifest = load_manifest(manifest_path)
     self._logger = AuditLogger(self._instance_id, self._manifest.role_name, audit_log_dir)
@@ -68,8 +72,18 @@ class UniversalShell:
         permission_checker=self._perm,
         audit_log_fn=self._logger.log,
         llm_call_fn=None,
+        # 修复 P0-3 & P2-5：统一注入 input_fn 和 gui_approval_fn
+        gui_approval_fn=gui_approval_fn,
+        input_fn=self._safe_input,
     )
-    self._tools = build_tools(self._manifest.capabilities, self._escalation.check)
+
+    # 修复 P2-4：向 build_tools 传入 self._safe_input，
+    # AskHumanTool 将使用它替代裸 input()
+    self._tools = build_tools(
+        self._manifest.capabilities,
+        self._escalation.check,
+        input_fn=self._safe_input,
+    )
 
     self._llm = LLMAdapter(model=model)
     self._escalation.set_llm_call_fn(self._make_pre_screen_call)
@@ -86,16 +100,14 @@ class UniversalShell:
     )
 
     self._cleanup_thread: Optional[threading.Thread] = None
-    # 性能优化：缓存脱水结果
     self._dehydration_cache: Dict[int, Dict] = {}
     self._last_dehydration_time = 0.0
-    self._DEHYDRATION_CACHE_TTL = cva_settings.memory_settings.dehydration_cache_ttl  # 缓存60秒，减少重复计算
+    self._DEHYDRATION_CACHE_TTL = cva_settings.memory_settings.dehydration_cache_ttl
 
   # ── 生命周期 ───────────────────────────────────────────────
 
   def start(self):
     os.makedirs(cva_settings.audit_settings.log_dir, exist_ok=True)
-
     self._start_time = time.time()
     self._print_banner()
 
@@ -105,8 +117,12 @@ class UniversalShell:
       "resumed": len(self._memory.messages) > 0,
     })
 
+    # 修复 P2-6：启动时重置停止事件，确保可以多次 start/stop
+    self._stop_event.clear()
     self._cleanup_thread = threading.Thread(
-        target=self._periodic_cleanup, daemon=True, name="CVA-Permission-Cleanup"
+        target=self._periodic_cleanup,
+        daemon=True,
+        name=f"CVA-Cleanup-{self._instance_id[:8]}"
     )
     self._cleanup_thread.start()
 
@@ -121,15 +137,25 @@ class UniversalShell:
     self._run_loop()
 
   def _periodic_cleanup(self):
-    """每 5 分钟自动清理过期权限（改进点3）"""
-    while True:
-      time.sleep(300)
+    """
+    每 5 分钟清理过期权限。
+
+    修复 P2-6：使用 _stop_event.wait(timeout) 替代 time.sleep()，
+    stop() 调用时立即通知线程退出，不需要等待下一个 sleep 周期结束。
+    """
+    while not self._stop_event.is_set():
+      # wait 返回 True 表示 event 被 set（收到停止信号），直接退出
+      if self._stop_event.wait(timeout=300):
+        break
       try:
         self._escalation.cleanup_expired_permissions()
       except Exception as e:
         print(f"[CVA] ⚠️ 自动清理线程异常: {e}")
 
   def stop(self, reason: str = "normal"):
+    # 修复 P2-6：通知 cleanup 线程退出
+    self._stop_event.set()
+
     duration = round(time.time() - (self._start_time or time.time()), 2)
     self._memory.close()
     print(f"\n[CVA] Agent 已停止（{reason}，耗时 {duration}s）")
@@ -145,25 +171,21 @@ class UniversalShell:
       last_msg = self._memory.messages[-1] if self._memory.messages else {}
       is_in_middle_of_tools = last_msg.get("role") == "assistant" and "tool_calls" in last_msg
 
-      # ─── 增强：动态反思指令（基于 TaskState，而非固定文本）───
       if self._iteration > 0 and self._iteration % 5 == 0 and not is_in_middle_of_tools:
         state = self._memory.get_current_state()
         reflection = self._build_reflection_prompt(state)
         self._memory.append({
           "role": "system",
           "content": reflection,
-          "_importance": "ANCHOR"  # 反思指令本身是重要的
+          "_importance": "ANCHOR"
         })
 
       self._iteration += 1
       tok = self._memory.token_estimate()
-      # print(f"\n[CVA] ── 第 {self._iteration} 轮推理（≈{tok:,} tokens）──")
       sys_logger.info(f"===== 第 {self._iteration} 轮迭代开始，当前内存消息数: {len(self._memory.messages)}，预估 Token: {tok} =====")
 
-      # messages_to_send = self._prepare_dehydrated_messages(keep_last_n=3)
       messages_to_send = self._memory.prepare_for_llm(keep_last_n=3)
 
-      # 调用 LLM
       response = self._llm.chat(
           messages=messages_to_send,
           system_prompt=self._get_effective_system_prompt(),
@@ -179,7 +201,6 @@ class UniversalShell:
           break
         continue
 
-      # 重置失败计数器
       consecutive_failures = 0
 
       if response.text and response.text.strip():
@@ -212,16 +233,13 @@ class UniversalShell:
 
   # ── 工具分发 ───────────────────────────────────────────────
 
-  # 高危工具分级表
-  _P0_TOOLS = {"run_shell"}  # 必须自省，只有shell命令才是真正高危
-  _P1_TOOLS = {"write_file", "append_file", "backup_file"}  # 可选自省
+  _P0_TOOLS = {"run_shell"}
+  _P1_TOOLS = {"write_file", "append_file", "backup_file"}
 
   def _dispatch_tool(self, tool_name: str, tool_input: Dict, call_id: str) -> Dict:
-    t0 = time.time()
     print(f"\n🔧 {tool_name}({json.dumps(tool_input, ensure_ascii=False)[:120]})")
     enriched_input = {**tool_input, "_context_summary": self._context_summary()}
 
-    # ─── 增强：P0 高危工具前置自省 ───
     if tool_name in self._P0_TOOLS:
       review = self._pre_execute_review(tool_name, tool_input)
       if not review.get("is_safe", True):
@@ -235,21 +253,18 @@ class UniversalShell:
         }
         return convert_tool_result_to_litellm(call_id, json.dumps(result, ensure_ascii=False))
 
-    # ─── submit_plan：成功后更新 TaskState ───
     tool = self._tools.get(tool_name)
     if not tool:
       result = {"status": "error", "message": f"工具 `{tool_name}` 未注册"}
     else:
       try:
         result = tool.execute(**enriched_input)
-        # 拦截 submit_plan 成功结果，更新状态机
         if tool_name == "submit_plan" and result.get("status") == "ok":
           self._memory.update_task_state(
               goal=tool_input.get("goal", ""),
               milestones=tool_input.get("milestones", []),
               iteration=self._iteration,
           )
-          # 标记 active_step 进展（可选：尝试匹配关键词）
           self._memory.get_current_state().add_knowledge(
               "last_plan_iteration", str(self._iteration)
           )
@@ -261,7 +276,6 @@ class UniversalShell:
     return convert_tool_result_to_litellm(call_id, json.dumps(result, ensure_ascii=False))
 
   def _build_tool_specs(self) -> List[Dict]:
-    """补全缺失的方法：将注册的工具转换为 API 定义格式"""
     return [t.to_api_spec() for t in self._tools.values()]
 
   # ── 辅助方法 ──
@@ -269,8 +283,6 @@ class UniversalShell:
   def _safe_input(self, _prompt: str):
     sys.stdout.write(_prompt)
     sys.stdout.flush()
-
-    # 兼容性修复：检查 stdin 是否有 buffer 属性
     if hasattr(sys.stdin, 'buffer'):
       line = sys.stdin.buffer.readline()
       try:
@@ -278,11 +290,9 @@ class UniversalShell:
       except UnicodeDecodeError:
         return line.decode('gbk', errors='replace').strip()
     else:
-      # 在没有 buffer 的环境下（如 io.StringIO 或某些 IDE 控制台）直接读取字符串
       return sys.stdin.readline().strip()
 
   def _visual_len(self, text: str) -> int:
-    """计算字符串的视觉宽度"""
     length = 0
     for char in text:
       if unicodedata.east_asian_width(char) in ('W', 'F'):
@@ -292,20 +302,15 @@ class UniversalShell:
     return length
 
   def _pad_line(self, label: str, value: str, width: int = 50) -> str:
-    """简化对齐逻辑：不再计算复杂的视觉宽度，改用标准字符串填充"""
-    # 使用简单的分隔符代替复杂的边框
     return f"  {label:<10} : {value}"
 
   def _print_banner(self):
     m = self._manifest
     sid = self._memory.session_id
     status = "恢复 (Resumed)" if self._memory.messages else "新建 (New)"
-
-    # 改用更现代、更简单的分隔符，避免特殊 Unicode 字符在 GUI 中产生的宽度偏差
     line = "─" * 110
-
     print(f"\n{line}")
-    print(f" 🚀 CVA SYSTEM v3.4 | {m.role_name}")
+    print(f" 🚀 CVA SYSTEM v3.6 | {m.role_name}")
     print(f"{line}")
     print(self._pad_line("模型", self._model))
     print(self._pad_line("Session", sid))
@@ -313,7 +318,6 @@ class UniversalShell:
     print(f"{line}\n")
 
   def _get_effective_system_prompt(self) -> str:
-
     llm_stats = self._llm.stats
     mem_stats = self._memory.stats
 
@@ -323,13 +327,12 @@ class UniversalShell:
       - 本次会话累计调用: {llm_stats.total_calls} 次
       - 累计消耗 Token: {llm_stats.total_tokens:,}
       - 内存上下文长度: {mem_stats.memory_messages} 条消息 (预估 {mem_stats.token_estimate} tokens)
-      - 提示：请评估任务复杂度与 Token 消耗。如果消耗过快且无进展，请反思并切换更高效的策略（如编写批量处理脚本）。
+      - 提示：请评估任务复杂度与 Token 消耗。如果消耗过快且无进展，请反思并切换更高效的策略。
     """).strip()
 
     raw_prompt = self._manifest.identity_prompt
     cap_json = json.dumps(self._manifest.capabilities, ensure_ascii=False, indent=2)
     cap_json = f"```json\n{cap_json}\n```"
-
     perm_json = json.dumps(self._perm.snapshot(), ensure_ascii=False, indent=2)
     perm_json = f"```json\n{perm_json}\n```"
 
@@ -344,9 +347,7 @@ class UniversalShell:
       - 提示：底座会自动对旧消息历史进行脱水，如需查看完整代码请重新 read_file。
     """).strip()
 
-    # ─── 增强：注入 TaskState 状态块 ───
     task_state_block = self._memory.get_current_state().to_prompt_block()
-
     parts = [effective_prompt, cost_report, law_prompt]
     if task_state_block:
       parts.append(task_state_block)
@@ -354,9 +355,6 @@ class UniversalShell:
     return "\n\n".join(parts)
 
   def _build_reflection_prompt(self, state) -> str:
-    """
-    增强：基于 TaskState 生成有针对性的动态反思指令，而非固定文本。
-    """
     if not state.current_goal:
       return "**自主反思**：你已执行多轮操作。请评估当前进度，如有需要请调用 submit_plan 更新计划。"
 
@@ -383,10 +381,6 @@ class UniversalShell:
     return "\n".join(prompt_parts)
 
   def _pre_execute_review(self, tool_name: str, tool_input: Dict) -> Dict:
-    """
-    增强：P0 高危工具前置自省（每次 P0 工具调用额外 +1 次 LLM，约 512 tokens）。
-    返回 {"is_safe": bool, "issues": [...], "suggestion": str}
-    """
     state = self._memory.get_current_state()
     state_summary = f"当前步骤：{state.active_step}" if state.active_step else "无明确任务步骤"
 
@@ -424,20 +418,17 @@ class UniversalShell:
     )
 
     if result is None:
-      # LLM 调用失败：保守策略，允许执行但记录警告
       print("   ⚠️  [自省] LLM 调用失败，跳过安全检查")
       return {"is_safe": True, "issues": [], "suggestion": ""}
 
     return result
 
   def _should_dehydrate(self, content: str) -> bool:
-    """快速判断是否需要脱水"""
     return ("artifact_type" in content and
             '"file_content"' in content and
             len(content) > 1000)
 
   def _extract_python_outline(self, code: str) -> str:
-    """提取Python代码大纲"""
     outline = []
     lines = code.split('\n')
     for line in lines:
@@ -447,7 +438,6 @@ class UniversalShell:
     return "\n".join(outline[:40])
 
   def _cleanup_dehydration_cache(self):
-    """清理过期的脱水缓存"""
     current_time = time.time()
     expired_keys = [
       k for k, v in self._dehydration_cache.items()
@@ -478,10 +468,13 @@ class UniversalShell:
     )
     if result is None:
       return PreScreenResult(is_necessary=True, reasoning="调用失败。")
-    return PreScreenResult(is_necessary=bool(result.get("is_necessary")), reasoning=str(result.get("reasoning")), alternative=str(result.get("alternative")))
+    return PreScreenResult(
+        is_necessary=bool(result.get("is_necessary")),
+        reasoning=str(result.get("reasoning")),
+        alternative=str(result.get("alternative"))
+    )
 
   def _context_summary(self, last_n: int = 6) -> str:
-    """生成上下文摘要（增强：纳入 tool 结果，提升 pre_screen 准确性）"""
     msgs = self._memory.messages
     recent = msgs[-last_n:] if len(msgs) > last_n else msgs
     lines = []
@@ -501,7 +494,6 @@ class UniversalShell:
             fn = tc.get("function", {})
             lines.append(f"[调用] {fn.get('name', '?')}({str(fn.get('arguments', ''))[:80]})")
       elif role == "tool":
-        # 增强：纳入 tool 结果摘要
         try:
           data = json.loads(m.get("content", "{}"))
           status = data.get("status", "?")

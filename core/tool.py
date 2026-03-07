@@ -1,10 +1,12 @@
 """
-原子工具集（Tool Catalog）v3.2 - Token优化版
-优化内容：
-- 搜索工具添加进度反馈
-- 改进错误处理，使用更具体的异常类型
-- 优化文件大小检查逻辑
-- 降低默认文件读取限制：50000 -> 30000字符，节省token
+原子工具集（Tool Catalog）v3.3
+
+修复内容：
+  P0-2: FindSymbolTool 只对根目录做一次权限检查，
+        导致 Agent 可通过 find_symbol 读取任意未授权文件。
+        → 遍历每个文件前单独调用 _check() 验证读权限。
+  P2-4: AskHumanTool 使用裸 input()，GUI 模式下 stdin 已被重定向会卡死。
+        → 通过注入的 input_fn 调用（与 shell._safe_input 对齐）。
 """
 import glob as glob_module
 import json
@@ -35,15 +37,16 @@ class Tool:
   description: str = ""
   input_schema: Dict = {}
 
-  def __init__(self, check_fn: Callable):
+  def __init__(self, check_fn: Callable, input_fn: Optional[Callable] = None):
     """
-    check_fn: escalation_manager.check 的引用
-    签名: check(tool_name, target, permission_type, reason, context) -> (bool, Optional[str])
+    check_fn : escalation_manager.check 的引用
+    input_fn : 统一输入函数（GUI 模式传 shell._safe_input，CLI 模式传 None 使用内置 input）
+               修复 P2-4：AskHumanTool 通过此函数获取用户输入，避免裸 input() 在 GUI 下卡死。
     """
     self._check = check_fn
+    self._input_fn = input_fn or input
 
   def _ctx(self, kwargs: dict) -> str:
-    """从 execute kwargs 中提取对话上下文摘要（由 shell._dispatch_tool 注入）"""
     return kwargs.get("_context_summary", "")
 
   def _secure_path(self, path: str) -> Optional[str]:
@@ -71,6 +74,7 @@ class Tool:
 
 
 # ─── 具体工具实现 ─────────────────────────────────────────────
+
 class FindSymbolTool(Tool):
   name = "find_symbol"
   description = "【全屏搜索】在整个项目中定位某个类或函数的定义位置。当你看到一个调用却不知道它在哪个文件时必用。"
@@ -84,31 +88,39 @@ class FindSymbolTool(Tool):
   }
 
   def execute(self, symbol_name: str, reason: str = "", **kwargs) -> Dict:
-    # 权限检查（通常允许在项目范围内搜索）
-    allowed, msg = self._check(self.name, ".", "read", reason, self._ctx(kwargs))
-    if not allowed:
-      return err("PERMISSION_DENIED", msg)
-
+    """
+    修复 P0-2：原来只对根目录 "." 做一次权限检查，然后无限制地读取所有文件。
+    现在对每个候选文件单独调用 _check()，只读取有权限的文件。
+    """
     import re
-    # 匹配 class Symbol 或 def Symbol 或 function Symbol
-    pattern = re.compile(rf'^\s*(?:class|def|function|func|async\s+function)\s+{symbol_name}\b', re.MULTILINE)
+    pattern = re.compile(
+        rf'^\s*(?:class|def|function|func|async\s+function)\s+{re.escape(symbol_name)}\b',
+        re.MULTILINE
+    )
     results = []
+    ctx = self._ctx(kwargs)
 
-    # 遍历项目（复用之前的安全路径逻辑）
     for root, dirs, files in os.walk("."):
-      # 排除干扰目录
-      dirs[:] = [d for d in dirs if not d.startswith(cva_settings.tool_settings.find_symbol_skip_start_with)]
+      dirs[:] = [d for d in dirs if not d.startswith(
+          tuple(cva_settings.tool_settings.find_symbol_skip_start_with)
+      )]
       for file in files:
-        if not file.endswith(cva_settings.tool_settings.find_symbol_skip_end_with):
+        if not file.endswith(tuple(cva_settings.tool_settings.find_symbol_skip_end_with)):
           continue
 
         path = os.path.join(root, file)
+
+        # 修复：对每个文件单独做权限检查，而非只检查根目录一次
+        allowed, _ = self._check(self.name, path, "read", reason, ctx)
+        if not allowed:
+          continue
+
         try:
           with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
             if pattern.search(content):
               results.append({"path": path, "type": "definition"})
-        except:
+        except OSError:
           continue
 
     return ok({"symbol": symbol_name, "found_in": results})
@@ -128,8 +140,6 @@ class GetProjectSummaryTool(Tool):
   }
 
   def execute(self, path: str = ".", max_depth: int = 3, reason: str = "", **kwargs) -> Dict:
-    # Fix 1: 先校验路径，再权限检查（空路径应返回 INVALID_PATH 而非 PERMISSION_DENIED）
-    # Fix 2: 传规范化后的 real_path 给 _check，确保与白名单格式一致
     real_path = self._secure_path(path)
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
@@ -148,24 +158,19 @@ class GetProjectSummaryTool(Tool):
     def walk_and_summarize(current_dir_path, current_depth):
       if current_depth > max_depth:
         return
-
       try:
-        # Fix 3: sorted() 对 DirEntry 排序必须指定 key，否则抛 TypeError 被静默吞掉导致返回空列表
         for entry in sorted(os.scandir(current_dir_path), key=lambda e: e.name):
-          if entry.name.startswith(cva_settings.tool_settings.project_summary_skip_files):
+          if entry.name.startswith(tuple(cva_settings.tool_settings.project_summary_skip_files)):
             continue
-
           full_entry_path = entry.path
           item = {
             "name": entry.name,
             "type": "dir" if entry.is_dir() else "file",
             "path": full_entry_path
           }
-
           if entry.is_file():
             try:
               item["fileSize"] = os.path.getsize(full_entry_path)
-              # 通过检测 null byte 区分二进制文件（二进制文件 fileLines=0）
               with open(full_entry_path, 'rb') as fb:
                 is_binary = b'\x00' in fb.read(8192)
               if is_binary:
@@ -179,12 +184,7 @@ class GetProjectSummaryTool(Tool):
             except OSError:
               item["fileSize"] = 0
               item["fileLines"] = 0
-            except Exception:
-              item["fileSize"] = 0
-              item["fileLines"] = 0
-
           summary_items.append(item)
-
           if entry.is_dir():
             walk_and_summarize(full_entry_path, current_depth + 1)
       except PermissionError:
@@ -193,7 +193,6 @@ class GetProjectSummaryTool(Tool):
         return
 
     walk_and_summarize(real_path, 0)
-
     return ok({"summary_items": summary_items})
 
 
@@ -215,16 +214,16 @@ class GetFileSkeletonTool(Tool):
       return err("PERMISSION_DENIED", msg)
 
     real_path = self._secure_path(path)
-    ext = os.path.splitext(real_path)[1].lower()
+    if real_path is None:
+      return err("INVALID_PATH", f"路径不安全或无效: {path}")
 
+    ext = os.path.splitext(real_path)[1].lower()
     try:
       with open(real_path, "r", encoding="utf-8") as f:
         source = f.read()
-
       if ext == ".py":
         return ok({"path": path, "skeleton": self._get_python_skeleton(source)})
       else:
-        # 对 C-style 语言 (JS, TS, C, Java, Go) 使用通用的正则提取
         return ok({"path": path, "skeleton": self._get_generic_skeleton(source)})
     except Exception as e:
       return err("PARSE_ERROR", str(e))
@@ -233,8 +232,6 @@ class GetFileSkeletonTool(Tool):
     import ast
     tree = ast.parse(source)
     skeleton = []
-
-    # ─── 新增：提取导入关系 ───
     imports = []
     for node in ast.iter_child_nodes(tree):
       if isinstance(node, ast.Import):
@@ -242,27 +239,20 @@ class GetFileSkeletonTool(Tool):
           imports.append(f"import {alias.name}")
       elif isinstance(node, ast.ImportFrom):
         imports.append(f"from {node.module} import {', '.join([n.name for n in node.names])}")
-
     if imports:
       skeleton.append("### Dependencies\n" + "\n".join(imports))
-
-    # ─── 原有的类和函数提取 ───
     for node in ast.iter_child_nodes(tree):
       if isinstance(node, ast.ClassDef):
-        # 记录继承关系，比如 class A(B):
         bases = [ast.unparse(b) for b in node.bases]
         base_str = f"({', '.join(bases)})" if bases else ""
         methods = [f"  def {m.name}(...): ..." for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
         skeleton.append(f"class {node.name}{base_str}:\n" + "\n".join(methods))
       elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         skeleton.append(f"def {node.name}(...): ...")
-
     return "\n\n".join(skeleton)
 
   def _get_generic_skeleton(self, source: str) -> str:
-    """基于正则的通用大纲提取（匹配函数和类声明）"""
     import re
-    # 匹配大多数语言中类似 function name(...) 或 class Name {...} 的结构
     pattern = re.compile(r'^ *(?:export +)?(?:class|function|def|async +function|public|private|static) +([a-zA-Z_][a-zA-Z0-9_]*)', re.MULTILINE)
     matches = pattern.findall(source)
     return "\n".join([f"{m} ..." for m in matches])
@@ -285,11 +275,9 @@ class ListDirectoryTool(Tool):
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
-    # 安全增强：使用更严格的路径规范化
     real_path = self._secure_path(path)
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
-
     if not os.path.exists(real_path):
       return err("NOT_FOUND", f"路径不存在: {path}")
     if not os.path.isdir(real_path):
@@ -299,7 +287,6 @@ class ListDirectoryTool(Tool):
       entries = []
       for name in sorted(os.listdir(real_path)):
         full = os.path.join(real_path, name)
-        # 安全检查：确保不会跟随符号链接到危险位置
         try:
           stat = os.stat(full, follow_symlinks=False)
           entries.append({
@@ -310,7 +297,6 @@ class ListDirectoryTool(Tool):
             "is_symlink": os.path.islink(full),
           })
         except (OSError, PermissionError):
-          # 跳过无法访问的文件/目录
           continue
       return ok({"path": real_path, "entries": entries, "count": len(entries)})
     except PermissionError as e:
@@ -354,10 +340,8 @@ class ReadFileTool(Tool):
 
       total_lines = len(lines)
       effective_end = end_line if end_line else total_lines
-
       start_idx = max(0, start_line - 1)
       end_idx = min(total_lines, effective_end)
-
       content = "".join(lines[start_idx:end_idx])
 
       if len(content) > self.MAX_RETURNED_CONTENT_CHARS:
@@ -385,22 +369,19 @@ class BackupFileTool(Tool):
     "type": "object",
     "properties": {
       "path": {"type": "string", "description": "要备份的文件路径"},
-      "reason": {"type": "string", "description": "备份原因（例如：修改配置文件前的自动备份）"},
+      "reason": {"type": "string", "description": "备份原因"},
     },
     "required": ["path"],
   }
 
   def execute(self, path: str, reason: str = "破坏性修改前的自动备份", **kwargs) -> Dict:
-    # 1. 权限检查（备份需要读权限）
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
-    # 2. 路径安全检查
     real_path = self._secure_path(path)
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
-
     if not os.path.exists(real_path):
       return err("NOT_FOUND", f"源文件不存在: {path}")
     if os.path.isdir(real_path):
@@ -409,27 +390,16 @@ class BackupFileTool(Tool):
     try:
       import datetime
       import shutil
-
-      # 3. 生成符合格式的备份路径
-      # 获取不带后缀的路径 (base) 和 后缀 (ext)
       base, ext = os.path.splitext(real_path)
-
-      # 格式化时间戳 (例如: 20231027_103000)
       timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-
-      # 拼接新路径: xxx-{timestamp}.ext
       backup_path = f"{base}-{timestamp}{ext}"
-
-      # 4. 执行物理复制 (copy2 会尝试保留元数据)
       shutil.copy2(real_path, backup_path)
-
       return ok({
         "original_path": real_path,
         "backup_path": backup_path,
         "timestamp": timestamp,
         "size": os.path.getsize(backup_path)
       })
-
     except Exception as e:
       return err("BACKUP_ERROR", f"备份失败: {str(e)}")
 
@@ -448,8 +418,7 @@ class WriteFileTool(Tool):
     "required": ["path", "content"],
   }
 
-  # 内容大小限制常量
-  MAX_CONTENT_SIZE = cva_settings.tool_settings.write_max_content_size  # 50MB
+  MAX_CONTENT_SIZE = cva_settings.tool_settings.write_max_content_size
 
   def execute(self, path: str, content: str, encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -467,7 +436,6 @@ class WriteFileTool(Tool):
     try:
       dir_path = os.path.dirname(real_path) or "."
       os.makedirs(dir_path, exist_ok=True)
-
       temp_path = real_path + f".tmp.{int(time.time())}"
       try:
         with open(temp_path, "w", encoding=encoding) as f:
@@ -480,7 +448,6 @@ class WriteFileTool(Tool):
           except OSError:
             pass
         raise
-
       return ok({"path": real_path, "bytes_written": len(content_bytes)})
     except OSError as e:
       return err("IO_ERROR", str(e))
@@ -499,8 +466,7 @@ class AppendFileTool(Tool):
     "required": ["path", "content"],
   }
 
-  # 内容大小限制常量
-  MAX_APPEND_SIZE = cva_settings.tool_settings.append_max_append_size  # 10MB
+  MAX_APPEND_SIZE = cva_settings.tool_settings.append_max_append_size
 
   def execute(self, path: str, content: str, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
@@ -539,7 +505,6 @@ class RunShellTool(Tool):
     "required": ["command"],
   }
 
-  # 命令限制常量
   MAX_COMMAND_LENGTH = cva_settings.tool_settings.shell_max_command_length
   MAX_ARGS_COUNT = cva_settings.tool_settings.shell_max_args_count
   MAX_TIMEOUT = cva_settings.tool_settings.shell_max_timeout
@@ -616,6 +581,11 @@ class AskHumanTool(Tool):
   }
 
   def execute(self, question: str, context: str = "", **_) -> Dict:
+    """
+    修复 P2-4：使用 self._input_fn 替代裸 input()。
+    GUI 模式下 _input_fn 由 build_tools() 注入 shell._safe_input，
+    CLI 模式下默认使用内置 input()，行为与修复前完全一致。
+    """
     print("\n" + "─" * 60)
     print("💬 [CVA 向您提问]")
     if context:
@@ -623,7 +593,9 @@ class AskHumanTool(Tool):
     print(f"   问题: {question}")
     print("─" * 60)
     try:
-      answer = input("   您的回答: ").strip()
+      answer = self._input_fn("   您的回答: ")
+      if isinstance(answer, str):
+        answer = answer.strip()
       print("─" * 60 + "\n")
       return ok({"answer": answer})
     except EOFError:
@@ -646,53 +618,44 @@ class SearchFilesTool(Tool):
     "required": ["pattern"],
   }
 
-  # 搜索限制常量
   MAX_MATCHES = cva_settings.tool_settings.search_max_matches
-  MAX_FILE_SIZE = cva_settings.tool_settings.search_max_file_size  # 10MB
-  PROGRESS_INTERVAL = cva_settings.tool_settings.progress_interval  # 每处理50个文件输出一次进度
+  MAX_FILE_SIZE = cva_settings.tool_settings.search_max_file_size
+  PROGRESS_INTERVAL = cva_settings.tool_settings.progress_interval
 
-  def execute(self, pattern: str, path: str = ".",
-      search_content: bool = False, reason: str = "", **kwargs) -> Dict:
+  def execute(self, pattern: str, path: str = ".", search_content: bool = False, reason: str = "", **kwargs) -> Dict:
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
     real_path = self._secure_path(path)
     if real_path is None or not os.path.exists(real_path):
-      return err("INVALID_PATH", "路径不存在")
+      return err("INVALID_PATH", f"路径不存在: {path}")
 
     try:
       matches = []
-      file_count = 0
-
       if not search_content:
-        # 文件名搜索
-        for found in glob_module.glob(os.path.join(real_path, "**", pattern), recursive=True):
-          if self._is_safe_path(found, real_path):
-            matches.append({"path": found, "type": "filename"})
+        for fpath in glob_module.glob(os.path.join(real_path, "**", f"*{pattern}*"), recursive=True):
+          if self._is_safe_path(fpath, real_path):
+            matches.append({"path": fpath, "type": "filename"})
             if len(matches) >= self.MAX_MATCHES:
               break
       else:
-        # 内容搜索（带进度反馈）
-        print(f"[搜索] 正在搜索内容: {pattern}")
+        file_count = 0
         for root, dirs, files in os.walk(real_path):
-          dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ('bin', 'etc', 'usr')]
+          if not self._is_safe_path(root, real_path):
+            dirs.clear()
+            continue
           for fname in files:
-            if fname.startswith("."):
-              continue
             fpath = os.path.join(root, fname)
             if not self._is_safe_path(fpath, real_path):
               continue
-
             file_count += 1
-            # 进度反馈
             if file_count % self.PROGRESS_INTERVAL == 0:
-              print(f"[搜索] 已处理 {file_count} 个文件，找到 {len(matches)} 个匹配")
-
+              print(f"[搜索] 已处理 {file_count} 个文件，找到 {len(matches)} 个匹配...")
             try:
               if os.path.getsize(fpath) > self.MAX_FILE_SIZE:
                 continue
-              with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+              with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
                 for i, line in enumerate(f, 1):
                   if pattern.lower() in line.lower():
                     matches.append({"path": fpath, "line": i, "content": line.rstrip()[:200], "type": "content"})
@@ -700,10 +663,8 @@ class SearchFilesTool(Tool):
                       break
             except (OSError, UnicodeDecodeError):
               continue
-
-          if len(matches) >= self.MAX_MATCHES:
-            break
-
+            if len(matches) >= self.MAX_MATCHES:
+              break
         print(f"[搜索] 完成！共处理 {file_count} 个文件，找到 {len(matches)} 个匹配")
 
       return ok({"matches": matches[:self.MAX_MATCHES], "count": len(matches), "pattern": pattern})
@@ -734,7 +695,7 @@ class HttpRequestTool(Tool):
     },
     "required": ["url", "method"],
   }
-  # 请求限制常量
+
   MAX_TIMEOUT = cva_settings.tool_settings.max_timeout
   MAX_BODY_SIZE = cva_settings.tool_settings.max_body_size
 
@@ -770,13 +731,12 @@ class SubmitPlanTool(Tool):
     "properties": {
       "goal": {"type": "string", "description": "最终目标"},
       "milestones": {"type": "array", "items": {"type": "string"}, "description": "关键步骤分解"},
-      "strategy": {"type": "string", "description": "采用的策略（例如：先搜索后修改，或编写 Python 脚本批量处理）"}
+      "strategy": {"type": "string", "description": "采用的策略"}
     },
     "required": ["goal", "milestones"]
   }
 
   def execute(self, goal: str, milestones: list, strategy: str = "", **kwargs) -> Dict:
-    # 纯记录工具，返回确认信息
     return ok({
       "status": "PLAN_ACCEPTED",
       "message": "计划已备案。请开始按计划执行，并在遇到重大阻碍时更新计划。",
@@ -786,7 +746,7 @@ class SubmitPlanTool(Tool):
 
 class ExecutePythonScriptTool(Tool):
   name = "execute_python_script"
-  description = "【高阶工具】在受控环境中执行一段 Python 代码。适合处理大批量文件、复杂逻辑计算或自定义数据分析。代码可以直接使用标准库。"
+  description = "【高阶工具】在受控环境中执行一段 Python 代码。适合处理大批量文件、复杂逻辑计算或自定义数据分析。"
   input_schema = {
     "type": "object",
     "properties": {
@@ -797,8 +757,6 @@ class ExecutePythonScriptTool(Tool):
   }
 
   def execute(self, script: str, reason: str = "", **kwargs) -> Dict:
-    # 强制走越权审批，因为脚本能力太强
-    # 修复：target 用 "python3" 才能命中 YAML shell 白名单，"PythonRuntime" 永远匹配不上
     allowed, msg = self._check(self.name, "python3", "shell", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
@@ -809,7 +767,6 @@ class ExecutePythonScriptTool(Tool):
       tmp_path = tmp.name
 
     try:
-      # 限制执行时间
       result = subprocess.run(
           [sys.executable, tmp_path],
           capture_output=True, text=True, timeout=60
@@ -828,7 +785,7 @@ class ExecutePythonScriptTool(Tool):
 
 class GetRepoMapTool(Tool):
   name = "get_repo_map"
-  description = "【项目语义地图】利用系统级 ctags 引擎生成整个项目的符号索引（类、函数、接口、宏）。在处理大型项目、查找跨文件定义、理解代码架构时必用。比 list_directory 更省 Token 且包含语义信息。"
+  description = "【项目语义地图】利用系统级 ctags 引擎生成整个项目的符号索引。"
   input_schema = {
     "type": "object",
     "properties": {
@@ -838,7 +795,6 @@ class GetRepoMapTool(Tool):
   }
 
   def execute(self, path: str = ".", reason: str = "", **kwargs) -> Dict:
-    # 1. 权限检查 (复用你的 CVA 权限检查器)
     allowed, msg = self._check(self.name, path, "read", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
@@ -847,16 +803,12 @@ class GetRepoMapTool(Tool):
     if not real_path or not os.path.exists(real_path):
       return err("INVALID_PATH", f"路径不存在: {path}")
 
-    # 2. 调用系统 ctags (确保你已执行 sudo pacman -S ctags)
-    # --fields=+n+S: 包含行号和函数签名
     cmd = cva_settings.tool_settings.repo_map_cmd + [real_path]
-
     try:
       result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
       if result.returncode != 0:
         return err("CTAGS_ERROR", result.stderr or "未知 ctags 错误")
 
-      # 3. 数据解析与聚合
       tags_by_file = {}
       for line in result.stdout.splitlines():
         if not line.strip():
@@ -869,31 +821,23 @@ class GetRepoMapTool(Tool):
           if fpath not in tags_by_file:
             tags_by_file[fpath] = []
           tags_by_file[fpath].append(tag)
-        except:
+        except Exception:
           continue
 
-      # 4. 生成“压缩大纲”格式 (AI 最容易理解的格式)
       repo_map = []
       for fpath in sorted(tags_by_file.keys()):
         rel_fpath = os.path.relpath(fpath, real_path)
         repo_map.append(f"file: {rel_fpath}")
-
-        # 按行号排序
         tags = sorted(tags_by_file[fpath], key=lambda x: x.get("line", 0))
         for t in tags:
           kind, name, sign, line = t.get("kind"), t.get("name"), t.get("signature", ""), t.get("line", 0)
           if kind in ("variable", "local", "parameter"):
-            continue  # 过滤局部变量
-
-          indent = "  "
-          if kind in ("method", "member", "field"):
-            indent = "    "
+            continue
+          indent = "    " if kind in ("method", "member", "field") else "  "
           repo_map.append(f"{indent}{kind} {name}{sign} [line:{line}]")
         repo_map.append("")
 
       final_text = "\n".join(repo_map)
-
-      # 5. Token 保护
       if len(final_text) > 20000:
         final_text = final_text[:20000] + "\n\n... [地图过长，已截断]"
 
@@ -930,10 +874,14 @@ TOOL_REGISTRY = {
 }
 
 
-def build_tools(capabilities: list, check_fn: Callable) -> Dict[str, Tool]:
+def build_tools(capabilities: list, check_fn: Callable, input_fn: Optional[Callable] = None) -> Dict[str, "Tool"]:
+  """
+  修复 P2-4：build_tools 透传 input_fn，由 shell.py 传入 self._safe_input。
+  AskHumanTool 会使用它代替裸 input()，保证 GUI 模式下不卡死。
+  """
   tools = {}
   for cap in capabilities:
     cls = TOOL_REGISTRY.get(cap)
     if cls:
-      tools[cap] = cls(check_fn)
+      tools[cap] = cls(check_fn, input_fn)
   return tools

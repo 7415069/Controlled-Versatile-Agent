@@ -1,15 +1,19 @@
 """
-权限申请管理器（Escalation Manager）v3.1 - 增强版
-流程：越权拦截 → LLM 自我二次确认 → 必须则人类审批 → 即时赋能
+权限申请管理器（Escalation Manager）v3.2
 
-新增功能：
-- 重复申请检测：避免重复审批相同权限
-- 权限有效期：自动撤销过期权限
-- 审批历史记录：追踪所有审批决策
+修复内容：
+  P0-3: _try_gui_approval() 在 Agent 子线程中直接创建 tk.Tk()，
+        违反 Tkinter 线程安全规则，导致 GUI 模式下进程崩溃。
+        → 改为通过 gui_approval_fn 回调，由主线程弹窗并返回结果。
+  P2-5: _console_approval() 的 'm' 分支使用裸 input()，
+        GUI 模式下 stdin 已被重定向会卡死。
+        → 统一使用注入的 _input_fn（与 shell._safe_input 对齐）。
+  P2-7: _rotate_log() 在 AuditLogger 的 _lock 外被调用，
+        多线程并发写时可能同时 rename 同一文件。
+        → _rotate_log 已在调用方 log() 的 _lock 内执行，补充注释说明。
 """
 
 import fnmatch
-import os
 import sys
 import threading
 import uuid
@@ -46,7 +50,7 @@ class EscalationRequest:
   deny_reason: Optional[str] = None
   llm_pre_screen_result: Optional[str] = None
   llm_pre_screen_reason: Optional[str] = None
-  expires_at: Optional[str] = None  # 权限过期时间
+  expires_at: Optional[str] = None
 
 
 @dataclass
@@ -58,7 +62,6 @@ class PreScreenResult:
 
 @dataclass
 class ApprovalRecord:
-  """审批记录"""
   request_id: str
   tool_name: str
   requested_path: str
@@ -76,8 +79,14 @@ class EscalationManager:
       permission_checker: PermissionChecker,
       audit_log_fn: Callable,
       llm_call_fn: Optional[Callable] = None,
-      permission_ttl_hours: int = 24,  # 权限有效期（小时）
-      use_gui: bool = True,
+      permission_ttl_hours: int = 24,
+      # 修复 P0-3：不再接受 use_gui 布尔参数，改为接受可选的 gui_approval_fn 回调。
+      # gui_approval_fn 由主线程负责弹窗，子线程（Agent）通过此回调等待审批结果。
+      # 签名：gui_approval_fn(req: EscalationRequest) -> Optional[tuple[bool, str]]
+      # 返回 None 表示 GUI 不可用，降级到控制台审批。
+      gui_approval_fn: Optional[Callable] = None,
+      # 统一输入函数（GUI 模式传 shell._safe_input，CLI 模式传 None 使用内置 input）
+      input_fn: Optional[Callable] = None,
   ):
     self._policy = policy
     self._perm = permission_checker
@@ -85,25 +94,34 @@ class EscalationManager:
     self._llm_call = llm_call_fn
     self._permission_ttl_hours = permission_ttl_hours
 
+    # 修复 P0-3：保存主线程弹窗回调，替代在子线程直接创建 tk.Tk()
+    self._gui_approval_fn = gui_approval_fn
+
+    # 修复 P2-5：统一输入函数
+    self._input_fn = input_fn or input
+
     self._pending: Dict[str, EscalationRequest] = {}
-    self._approval_history: List[ApprovalRecord] = []  # 审批历史
+    self._approval_history: List[ApprovalRecord] = []
     self._lock = threading.Lock()
-    self._use_gui = use_gui
 
   def set_llm_call_fn(self, fn: Callable):
     self._llm_call = fn
 
+  def set_gui_approval_fn(self, fn: Optional[Callable]):
+    """动态绑定主线程弹窗回调（GUI 启动后调用）"""
+    self._gui_approval_fn = fn
+
   def check(self, tool_name: str, target: str, permission_type: str, reason: str = "", context_summary: str = "") -> tuple[bool, Optional[str]]:
-    # 1. 检查自动拒绝模式（CRITICAL 级别，直接拒绝，不触发 LLM）
+    # 1. 自动拒绝黑名单
     if self._matches_auto_deny(target):
       self._audit("AUTO_DENIED", {"tool_name": tool_name, "target": target})
       return False, f"访问被自动拒绝：路径 `{target}` 命中安全黑名单。"
 
-    # 2. 检查是否已有权限
+    # 2. 已有权限
     if self._is_permitted(tool_name, target, permission_type):
       return True, None
 
-    # 3. 检查是否有重复的已批准申请
+    # 3. 重复申请复用
     duplicate_record = self._find_duplicate_approval(tool_name, target, permission_type)
     if duplicate_record:
       if not self._is_expired(duplicate_record):
@@ -120,18 +138,16 @@ class EscalationManager:
     # 4. 创建越权申请
     req = self._create_request(tool_name, target, permission_type, reason, context_summary)
 
-    # ─── 增强：风险分级，LOW 自动批准，跳过 LLM ───
+    # 5. 风险分级
     risk_level = self._classify_risk_level(tool_name, target, permission_type)
-    req_detail = f"风险级别={risk_level}, 工具={tool_name}, 路径={target}, 权限={permission_type}"
-    self._audit("RISK_CLASSIFIED", {"request_id": req.request_id, "risk_level": risk_level, "detail": req_detail})
+    self._audit("RISK_CLASSIFIED", {"request_id": req.request_id, "risk_level": risk_level})
 
     if risk_level == "LOW":
-      # 自动批准，跳过所有 LLM 调用
       self.approve(req.request_id)
       self._audit("AUTO_APPROVED_LOW_RISK", {"request_id": req.request_id})
       return True, None
 
-    # 5. LLM 二次确认（MEDIUM 和 HIGH 才触发）
+    # 6. LLM 二次确认
     pre_screen = self._llm_pre_screen(req)
     req.llm_pre_screen_result = "necessary" if pre_screen.is_necessary else "unnecessary"
     req.llm_pre_screen_reason = pre_screen.reasoning
@@ -143,7 +159,6 @@ class EscalationManager:
       self._audit("LLM_SELF_DENIED", {"request_id": req.request_id, "llm_reasoning": pre_screen.reasoning})
       return False, f"越权访问 `{target}` 已被智能降级拒绝。\n理由：{pre_screen.reasoning}"
 
-    # 6. MEDIUM：pre_screen 通过后自动批准；HIGH：需人类审批
     self._audit("LLM_PRE_SCREEN_PASSED", {"request_id": req.request_id, "risk_level": risk_level})
 
     if risk_level == "MEDIUM":
@@ -151,44 +166,28 @@ class EscalationManager:
       self._audit("AUTO_APPROVED_MEDIUM_RISK", {"request_id": req.request_id})
       return True, None
 
-    # HIGH：走人类审批
+    # HIGH：人类审批
     approved, message = self._ask_human(req)
     return (True, None) if approved else (False, message)
 
   def _classify_risk_level(self, tool_name: str, target: str, permission_type: str) -> str:
-    """
-    增强：风险分级规则引擎（零 LLM 调用）。
-    LOW    → 自动批准（无需 LLM）
-    MEDIUM → LLM pre_screen 通过后自动批准
-    HIGH   → LLM pre_screen + 人类审批
-    """
     target_lower = target.lower()
-
-    # CRITICAL 级别由 _matches_auto_deny 在外层处理，此处不再重复
-
-    # HIGH 级别：破坏性 shell 操作，或涉及敏感信息
     high_indicators = [
-      # execute_python 能力极强，始终 HIGH
       tool_name == "execute_python_script",
-      # run_shell：只有写操作或含危险关键词才 HIGH，只读命令（ls/cat/grep）是 MEDIUM
       (tool_name == "run_shell" and any(
           kw in target_lower for kw in ["rm ", "dd ", "mkfs", "chmod", "chown", "sudo", "> /", ">> /"]
       )),
-      # 含敏感关键词的路径
       any(kw in target_lower for kw in ["secret", "password", "token", "credential", ".env"]),
     ]
     if any(high_indicators):
       return "HIGH"
 
-    # LOW 级别：只读操作且目标在已知安全范围内
     safe_prefixes = ["./core", "./tests", "./docs", "./agent_workspace", "./roles"]
     is_read_only = permission_type in ("read", "list")
     in_safe_dir = any(target.startswith(p) for p in safe_prefixes)
-
     if is_read_only and in_safe_dir:
       return "LOW"
 
-    # MEDIUM：write 到项目目录，一般 shell 命令，http 请求等
     return "MEDIUM"
 
   def approve(self, request_id: str, approved_paths: Optional[List[str]] = None):
@@ -196,18 +195,13 @@ class EscalationManager:
       req = self._pending.get(request_id)
       if not req:
         return
-
       req.status = EscalationStatus.APPROVED
       req.decision_time = datetime.now(timezone.utc).isoformat()
-
-      # 设置权限过期时间
       expires_at = datetime.now(timezone.utc) + timedelta(hours=self._permission_ttl_hours)
       req.expires_at = expires_at.isoformat()
-
       paths = approved_paths if approved_paths else [req.requested_path]
       req.approved_paths = paths
 
-      # 授予权限
       if req.permission_type in ("read", "list"):
         self._perm.grant_read(paths)
       elif req.permission_type == "write":
@@ -216,9 +210,7 @@ class EscalationManager:
       elif req.permission_type == "shell":
         self._perm.grant_shell(paths)
 
-      # 记录审批历史
       self._record_approval(req)
-
       self._audit("ESCALATION_APPROVED", {
         "request_id": request_id,
         "approved_paths": paths,
@@ -236,14 +228,11 @@ class EscalationManager:
       self._audit("ESCALATION_DENIED", {"request_id": request_id, "deny_reason": reason})
 
   def cleanup_expired_permissions(self):
-    """清理过期的权限"""
     with self._lock:
       expired_records = [r for r in self._approval_history if self._is_expired(r)]
-
       for record in expired_records:
         self._revoke_expired_permission(record)
         self._approval_history.remove(record)
-
         self._audit("PERMISSION_EXPIRED", {
           "request_id": record.request_id,
           "tool_name": record.tool_name,
@@ -252,7 +241,6 @@ class EscalationManager:
         })
 
   def get_approval_history(self) -> List[ApprovalRecord]:
-    """获取审批历史"""
     with self._lock:
       return list(self._approval_history)
 
@@ -260,20 +248,14 @@ class EscalationManager:
     if not self._llm_call:
       return PreScreenResult(is_necessary=True, reasoning="二次确认不可用。")
     print(f"\n[CVA·二次确认] 🤔 正在评估必要性: {req.tool_name}({req.requested_path})")
-
-    # ─── 增强：_classify_risk_level 已在外层处理了 LOW/CRITICAL，此处只处理 MEDIUM/HIGH ───
     risk_level = self._classify_risk_level(req.tool_name, req.requested_path, req.permission_type)
-
     try:
       return self._llm_call(req)
     except Exception as e:
-      # ─── 修复：LLM 失败时按风险级别决定降级策略，而非一律放行 ───
       if risk_level == "HIGH":
-        # HIGH 风险：LLM 失败 → 要求人类审批（不自动放行）
         print(f"[CVA·二次确认] ⚠️  LLM 调用失败（{e}），HIGH 风险操作升级为人类审批")
         return PreScreenResult(is_necessary=True, reasoning=f"LLM 不可用，HIGH 风险需人类确认。原始错误: {e}")
       else:
-        # MEDIUM 风险：LLM 失败 → 保守放行（已有基础权限检查兜底）
         print(f"[CVA·二次确认] ⚠️  LLM 调用失败（{e}），MEDIUM 风险保守放行")
         return PreScreenResult(is_necessary=True, reasoning=f"LLM 不可用，MEDIUM 风险保守放行。原始错误: {e}")
 
@@ -283,104 +265,64 @@ class EscalationManager:
     print(f"  工具: {req.tool_name} | 路径: {req.requested_path} | 类型: {req.permission_type}")
     print(f"  理由: {req.reason or '（无）'}")
     print("─" * 60)
-    gui_result = self._try_gui_approval(req)
-    if gui_result is not None:
-      return gui_result
+
+    # 修复 P0-3：通过注入的回调让主线程弹窗，而非在子线程直接创建 Tkinter 窗口
+    if self._gui_approval_fn is not None:
+      result = self._gui_approval_fn(req)
+      if result is not None:
+        return result
+
     return self._console_approval(req)
 
-  def _try_gui_approval(self, req: EscalationRequest) -> Optional[tuple[bool, str]]:
-    """尝试使用 Tkinter 弹出居中的审批窗口"""
-    if not self._use_gui:
-      return None
-      # 自动检测无头环境
-    if os.environ.get("DISPLAY") is None and sys.platform != "win32":
-      return None
-    try:
-      import tkinter as tk
-      from tkinter import messagebox, simpledialog
-
-      root = tk.Tk()
-      root.withdraw()  # 隐藏主窗口
-
-      # ─── 修复：让弹窗真正居中 ───
-      root.update_idletasks()
-
-      # 获取屏幕宽高
-      screen_width = root.winfo_screenwidth()
-      screen_height = root.winfo_screenheight()
-
-      # 设置一个合理的窗口大小（用于计算居中位置）
-      window_width = 500
-      window_height = 300
-
-      # 计算居中位置（窗口中心 = 屏幕中心）
-      x = (screen_width - window_width) // 2
-      y = (screen_height - window_height) // 2
-
-      # 设置窗口位置
-      root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-      # ─────────────────────────
-
-      info_text = (
-        f"工具: {req.tool_name}\n类型: {req.permission_type.upper()}\n"
-        f"路径: {req.requested_path}\n\n理由: {req.reason or '未说明'}"
-      )
-
-      choice = messagebox.askyesnocancel(
-          title="🔐 CVA 权限申请",
-          message=info_text,
-          detail="[是] 批准  [否] 拒绝  [取消] 修改路径",
-          icon="warning",
-          parent=root  # 绑定到已定位的 root
-      )
-
-      if choice:
-        root.destroy()
-        self.approve(req.request_id)
-        return True, ""
-      elif choice is False:
-        deny_reason = simpledialog.askstring("拒绝理由", "请输入拒绝原因:", parent=root)
-        root.destroy()
-        self.deny(req.request_id, deny_reason or "人类直接拒绝")
-        return False, f"访问被拒绝: {deny_reason or ''}"
-      elif choice is None:
-        new_path = simpledialog.askstring("修改路径", "请输入批准的路径:", initialvalue=req.requested_path, parent=root)
-        root.destroy()
-        if new_path:
-          paths = [p.strip() for p in new_path.split(",") if p.strip()]
-          self.approve(req.request_id, paths)
-          return True, ""
-        return False, "路径为空，视为拒绝"
-
-    except Exception:
-      return None
-
   def _console_approval(self, req: EscalationRequest) -> tuple[bool, str]:
+    """
+    修复 P2-5：所有 input() 调用统一替换为 self._input_fn。
+    GUI 模式下 _input_fn = shell._safe_input（通过队列与主线程交互），
+    CLI 模式下 _input_fn = 内置 input()，行为与修复前完全一致。
+    """
     print("  选项: [y] 批准  [n] 拒绝  [m] 修改路径")
     timeout = self._policy.timeout_seconds
-    # 注意：此处 input 处理在 shell.py 中统一加固
     choice = self._input_with_timeout(f"  请输入选项（{timeout}s 超时）: ", timeout)
+
     if choice is None:
       return False, "超时自动拒绝"
+
     c = choice.strip().lower()
     if c == 'y':
       self.approve(req.request_id)
       return True, ""
     elif c == 'm':
-      new_path = input("  请输入新路径: ").strip()
+      # 修复 P2-5：原来这里使用裸 input()，GUI 模式下会卡死
+      new_path = self._input_fn("  请输入新路径: ")
+      if isinstance(new_path, str):
+        new_path = new_path.strip()
       if new_path:
         self.approve(req.request_id, [new_path])
         return True, ""
+
     self.deny(req.request_id)
     return False, "人类拒绝"
 
   def _input_with_timeout(self, prompt: str, timeout: int) -> Optional[str]:
+    """
+    带超时的输入函数。
+    使用 self._input_fn 统一处理 CLI/GUI 两种模式。
+    SIGALRM 仅在 Unix + CLI 模式下有效；GUI 模式依赖主线程超时逻辑。
+    """
     import signal
+
     if sys.platform == "win32":
-      # Windows 无法使用 signal.alarm，简单回退
       try:
-        return input(prompt)
-      except:
+        return self._input_fn(prompt)
+      except Exception:
+        return None
+
+    # Unix：使用 SIGALRM 实现超时（仅在主线程有效，子线程 signal 不可用）
+    # 如果 _input_fn 不是内置 input（如 GUI 模式），跳过 SIGALRM，直接调用
+    if self._input_fn is not input:
+      try:
+        return self._input_fn(prompt)
+      except Exception:
         return None
 
     def _h(s, f):
@@ -389,10 +331,10 @@ class EscalationManager:
     signal.signal(signal.SIGALRM, _h)
     signal.alarm(timeout)
     try:
-      r = input(prompt)
+      r = self._input_fn(prompt)
       signal.alarm(0)
       return r
-    except:
+    except Exception:
       signal.alarm(0)
       return None
 
@@ -435,7 +377,6 @@ class EscalationManager:
     return req
 
   def _find_duplicate_approval(self, tool_name: str, target: str, permission_type: str) -> Optional[ApprovalRecord]:
-    """查找重复的已批准申请"""
     for record in self._approval_history:
       if (record.tool_name == tool_name and
           record.requested_path == target and
@@ -445,17 +386,15 @@ class EscalationManager:
     return None
 
   def _is_expired(self, record: ApprovalRecord) -> bool:
-    """检查审批记录是否过期"""
     if not record.expires_at:
       return False
     try:
       expires_at = datetime.fromisoformat(record.expires_at)
       return datetime.now(timezone.utc) > expires_at
-    except:
+    except Exception:
       return False
 
   def _record_approval(self, req: EscalationRequest):
-    """记录审批历史"""
     record = ApprovalRecord(
         request_id=req.request_id,
         tool_name=req.tool_name,
@@ -467,13 +406,10 @@ class EscalationManager:
         approved_paths=req.approved_paths
     )
     self._approval_history.append(record)
-
-    # 限制历史记录数量
     if len(self._approval_history) > 1000:
       self._approval_history = self._approval_history[-500:]
 
   def _revoke_expired_permission(self, record: ApprovalRecord):
-    """撤销过期的权限"""
     if record.permission_type in ("read", "list"):
       self._perm.revoke_read(record.approved_paths)
     elif record.permission_type == "write":

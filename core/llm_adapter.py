@@ -1,5 +1,8 @@
 """
-LiteLLM 适配层（LLM Adapter）v3.2 - 错误处理增强版 + 公开统计接口
+LiteLLM 适配层（LLM Adapter）v3.3
+修复 P1-3：__init__ 中 _extra_kwargs 与 kwargs 指向同一 dict，
+           pop 操作同时修改了 _extra_kwargs，导致透传参数全部丢失。
+           修复方法：先 pop 所有已知 key，再把剩余的 kwargs 赋给 _extra_kwargs。
 """
 
 import json
@@ -71,16 +74,21 @@ class CallStats:
 class LLMAdapter:
   def __init__(self, model: str, **kwargs):
     self._model = model
-    self._extra_kwargs = kwargs
+
+    # 修复 P1-3：先 pop 所有已知参数，再把剩余的 kwargs 赋给 _extra_kwargs。
+    # 原来的代码先做 `self._extra_kwargs = kwargs`（两个变量指向同一 dict），
+    # 再调用 kwargs.pop()，导致 _extra_kwargs 也被修改，最终变成空 dict。
     self._max_retries = kwargs.pop('max_retries', cva_settings.llm_settings.max_retries)
     self._retry_delay = kwargs.pop('retry_delay', cva_settings.llm_settings.retry_delay)
     self._timeout = kwargs.pop('timeout', cva_settings.llm_settings.timeout)
-    self._lock = threading.RLock()
-    self._stats = CallStats()
-
-    # ─── 核心修改：调大输入上限以配合底座脱水 ───
     self._max_input_length = kwargs.pop('max_input_length', cva_settings.llm_settings.max_input_length)
     self._max_output_tokens = kwargs.pop('max_output_tokens', cva_settings.llm_settings.max_output_tokens)
+
+    # pop 完已知 key 后，剩余的才是真正需要透传给 litellm 的参数
+    self._extra_kwargs = dict(kwargs)
+
+    self._lock = threading.RLock()
+    self._stats = CallStats()
 
   @property
   def model(self) -> str:
@@ -88,9 +96,7 @@ class LLMAdapter:
 
   @property
   def stats(self) -> CallStats:
-    """公开统计信息接口"""
     with self._lock:
-      # 返回副本，防止外部修改
       return CallStats(
           total_calls=self._stats.total_calls,
           successful_calls=self._stats.successful_calls,
@@ -100,11 +106,18 @@ class LLMAdapter:
           error_counts=dict(self._stats.error_counts),
       )
 
-  def chat(self, messages: List[Dict], system_prompt: str, tools: Optional[List[Dict]] = None, max_tokens: int = 8192, temperature: float = 0.0) -> LLMResponse:
+  def chat(self, messages: List[Dict], system_prompt: str, tools: Optional[List[Dict]] = None,
+      max_tokens: int = 8192, temperature: float = 0.0) -> LLMResponse:
     start_time = time.time()
     validation_error = self._validate_chat_request(messages, system_prompt, tools, max_tokens)
     if validation_error:
-      return LLMResponse(text=f"[请求验证失败] {validation_error}", tool_calls=[], finish_reason="error", error=LLMError(LLMErrorType.INVALID_REQUEST, validation_error), response_time=time.time() - start_time)
+      return LLMResponse(
+          text=f"[请求验证失败] {validation_error}",
+          tool_calls=[],
+          finish_reason="error",
+          error=LLMError(LLMErrorType.INVALID_REQUEST, validation_error),
+          response_time=time.time() - start_time
+      )
 
     full_payload = [{"role": "system", "content": system_prompt}] + messages
     trace_logger.debug(f"--- [LLM REQUEST] ---")
@@ -118,16 +131,26 @@ class LLMAdapter:
     if response:
       trace_logger.debug(f"--- [LLM RESPONSE] ---")
       trace_logger.debug(f"Finish Reason: {response.finish_reason}")
-      trace_logger.debug(f"Text Content: {response.text[:500]}...")  # 避免过长
+      trace_logger.debug(f"Text Content: {response.text[:500]}...")
       response.response_time = response_time
-    return response or LLMResponse(text=f"[LLM 调用失败] {error.message if error else '未知错误'}", tool_calls=[], finish_reason="error", error=error, response_time=response_time)
+    return response or LLMResponse(
+        text=f"[LLM 调用失败] {error.message if error else '未知错误'}",
+        tool_calls=[],
+        finish_reason="error",
+        error=error,
+        response_time=response_time
+    )
 
   def structured_chat(self, messages: List[Dict], system_prompt: str, output_schema: Dict,
-      function_name: str, function_description: str, max_tokens: int = 1024, temperature: float = 0.0) -> Optional[Dict]:
+      function_name: str, function_description: str,
+      max_tokens: int = 1024, temperature: float = 0.0) -> Optional[Dict]:
     validation_error = self._validate_structured_request(messages, system_prompt, output_schema, function_name, max_tokens)
     if validation_error:
       return None
-    response, error = self._call_with_retry(self._do_structured_call, messages, system_prompt, output_schema, function_name, function_description, max_tokens, temperature)
+    response, error = self._call_with_retry(
+        self._do_structured_call,
+        messages, system_prompt, output_schema, function_name, function_description, max_tokens, temperature
+    )
     return response
 
   def _call_with_retry(self, call_func, *args):
@@ -153,21 +176,27 @@ class LLMAdapter:
       "max_tokens": min(max_tokens, self._max_output_tokens),
       "temperature": temperature,
       "timeout": self._timeout,
-      **self._extra_kwargs
+      **self._extra_kwargs  # 现在能正确透传调用方传入的额外参数
     }
     if tools:
       kwargs["tools"] = _convert_tools_to_litellm(tools)
       kwargs["tool_choice"] = "auto"
-
-    # 消除警告
     res = completion(**kwargs)
     return self._parse_response(cast(Any, res))
 
   def _do_structured_call(self, messages, system_prompt, output_schema, function_name, function_description, max_tokens, temperature):
     forced_tool = [{"type": "function", "function": {"name": function_name, "description": function_description, "parameters": output_schema}}]
     full_messages = [{"role": "system", "content": system_prompt}] + messages
-    kwargs = {"model": self._model, "messages": full_messages, "max_tokens": min(max_tokens, self._max_output_tokens), "temperature": temperature, "timeout": self._timeout, "tools": forced_tool,
-              "tool_choice": {"type": "function", "function": {"name": function_name}}, **self._extra_kwargs}
+    kwargs = {
+      "model": self._model,
+      "messages": full_messages,
+      "max_tokens": min(max_tokens, self._max_output_tokens),
+      "temperature": temperature,
+      "timeout": self._timeout,
+      "tools": forced_tool,
+      "tool_choice": {"type": "function", "function": {"name": function_name}},
+      **self._extra_kwargs
+    }
     return self._parse_structured_response(completion(**kwargs))
 
   def _validate_chat_request(self, messages, system_prompt, tools, max_tokens):
@@ -203,16 +232,21 @@ class LLMAdapter:
         try:
           args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
           tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, input=args))
-        except:
+        except Exception:
           pass
     usage = {"total_tokens": getattr(response.usage, "total_tokens", 0)}
-    return LLMResponse(text=text, tool_calls=tool_calls, finish_reason=response.choices[0].finish_reason or "stop", usage=usage)
+    return LLMResponse(
+        text=text,
+        tool_calls=tool_calls,
+        finish_reason=response.choices[0].finish_reason or "stop",
+        usage=usage
+    )
 
   def _parse_structured_response(self, response):
     try:
       args = response.choices[0].message.tool_calls[0].function.arguments
       return json.loads(args) if isinstance(args, str) else args
-    except:
+    except Exception:
       return None
 
   def _update_stats(self, resp, err, rtime):
@@ -220,7 +254,6 @@ class LLMAdapter:
       self._stats.total_calls += 1
       if resp and not err:
         self._stats.successful_calls += 1
-        # 更新 token 统计
         if resp.usage:
           self._stats.total_tokens += resp.usage.get("total_tokens", 0)
         self._stats.total_response_time += rtime
@@ -235,7 +268,6 @@ def _convert_tools_to_litellm(tools):
 
 
 def convert_tool_result_to_litellm(tool_use_id: str, content: str) -> dict:
-  # 必须使用 tool 角色，内容不能为空
   return {
     "role": "tool",
     "tool_call_id": tool_use_id,
@@ -244,7 +276,6 @@ def convert_tool_result_to_litellm(tool_use_id: str, content: str) -> dict:
 
 
 def convert_assistant_with_tools_to_litellm(text: str, tool_calls: List[ToolCall]) -> dict:
-  # DeepSeek 建议 content 为字符串而非 None
   msg: Dict[str, Any] = {"role": "assistant", "content": text if text else ""}
   if tool_calls:
     msg["tool_calls"] = [

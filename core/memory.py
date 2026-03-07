@@ -1,10 +1,13 @@
 """
-上下文记忆模块（Memory Store）v2.2 - Token优化版
-优化内容：
-- Token估算缓存时间延长：从30秒延长到60秒
-- 优化token估算算法：减少不必要的字符串操作
-- 改进文件操作：使用更高效的写入策略
-- 默认token预算降低：80000 -> 50000，更早触发截断
+上下文记忆模块（Memory Store）v2.3 - 并发安全修复版
+
+修复内容：
+  P0-1: append() 持有 _lock 期间调用 os.fsync() 导致死锁
+        → 将 I/O 操作（fsync、_save_meta）移至 _lock 释放后执行
+  P1-2: flush() 与 append() 使用不同的锁（_file_lock vs _lock）产生竞态
+        → 统一删除 _file_lock，所有文件操作归 _lock 管辖
+  P2-3: TaskState.discovered_knowledge 无上限，长期运行后 token 膨胀
+        → add_knowledge() 增加 LRU 上限（默认 50 条），超出时淘汰最旧的键
 """
 
 import json
@@ -20,6 +23,10 @@ from typing import Dict, List, Optional, Any
 from litellm import token_counter
 
 from core.config import cva_settings
+
+# ─── 常量 ─────────────────────────────────────────────────────
+
+_KNOWLEDGE_MAX_ENTRIES = 50  # TaskState 知识库最大条目数
 
 
 # ─── 数据模型 ─────────────────────────────────────────────────
@@ -38,7 +45,6 @@ class SessionMeta:
 
 @dataclass
 class MemoryStats:
-  """内存使用统计"""
   total_messages: int = 0
   memory_messages: int = 0
   token_estimate: int = 0
@@ -72,37 +78,42 @@ class TaskState:
       self.pending_risks = []
 
   def update_from_plan(self, goal: str, milestones: List[str], iteration: int):
-    """从 submit_plan 的参数更新状态机"""
     self.current_goal = goal
     self.plan = milestones
     self.active_step = milestones[0] if milestones else ""
     self.iteration_at_plan = iteration
-    # 重置已完成步骤（新计划覆盖旧计划）
     self.completed_steps = []
 
   def mark_step_done(self, step_description: str):
-    """标记一个步骤完成，自动推进 active_step"""
     if self.active_step and self.active_step not in self.completed_steps:
       self.completed_steps.append(self.active_step)
-
-    # 推进到下一个未完成的步骤
     for step in self.plan:
       if step not in self.completed_steps:
         self.active_step = step
         return
-    self.active_step = ""  # 所有步骤完成
+    self.active_step = ""
 
   def add_knowledge(self, key: str, value: str):
-    """记录发现的关键事实"""
+    """
+    记录发现的关键事实。
+
+    修复 P2-3：加入 LRU 上限。当条目数超过 _KNOWLEDGE_MAX_ENTRIES 时，
+    淘汰最早插入的键，防止 System Prompt 因知识库无限增长而膨胀。
+    """
+    # 若 key 已存在，先删除以刷新插入顺序（Python 3.7+ dict 保持插入序）
+    self.discovered_knowledge.pop(key, None)
     self.discovered_knowledge[key] = value
 
+    # 超出上限时删除最旧的条目
+    while len(self.discovered_knowledge) > _KNOWLEDGE_MAX_ENTRIES:
+      oldest_key = next(iter(self.discovered_knowledge))
+      del self.discovered_knowledge[oldest_key]
+
   def add_risk(self, risk: str):
-    """记录识别到的风险"""
     if risk not in self.pending_risks:
       self.pending_risks.append(risk)
 
   def to_prompt_block(self) -> str:
-    """生成紧凑的状态摘要，注入 System Prompt（约 150–250 tokens）"""
     if not self.current_goal:
       return ""
 
@@ -142,10 +153,10 @@ class MemoryStore:
   """
   跨 session 持久化对话历史。
 
-  性能优化：
-  - Token估算缓存时间延长到30秒
-  - 优化估算算法，减少字符串操作
-  - 批量写入优化
+  并发安全说明：
+    - 统一使用单把 _lock（RLock）保护所有内存状态和文件操作。
+    - 去除了原来的 _file_lock，避免双锁导致的竞态条件。
+    - append() 的 fsync / _save_meta 在释放 _lock 后执行，消除持锁期间阻塞。
   """
 
   def __init__(
@@ -162,11 +173,10 @@ class MemoryStore:
     self._max_token_budget = max_token_budget or cva_settings.memory_settings.default_token_budget
     self._model = model
 
-    # 线程安全锁
+    # 修复 P1-2：只保留一把锁，消除双锁竞态
     self._lock = threading.RLock()
-    self._file_lock = threading.Lock()
 
-    # 文件句柄管理
+    # 文件句柄
     self._file: Optional[Any] = None
     self._file_path: Optional[str] = None
 
@@ -174,7 +184,7 @@ class MemoryStore:
     self._stats = MemoryStats()
     self._last_token_calc_time = 0.0
     self._cached_token_estimate = 0
-    self._TOKEN_CACHE_TTL = cva_settings.memory_settings.token_cache_ttl  # 延长缓存时间到60秒
+    self._TOKEN_CACHE_TTL = cva_settings.memory_settings.token_cache_ttl
 
     # 错误恢复
     self._corruption_detected = False
@@ -184,7 +194,7 @@ class MemoryStore:
     self._role_dir = os.path.join(memory_dir, _safe_name(role_name))
     os.makedirs(self._role_dir, exist_ok=True)
 
-    # ─── 增强：TaskState 状态机 ───
+    # TaskState 状态机
     self._task_state = TaskState()
 
     # 加载或创建 session
@@ -201,7 +211,6 @@ class MemoryStore:
     self._meta = self._load_or_create_meta()
     self._open_file()
 
-    # 注册清理函数（防止内存泄漏）
     weakref.finalize(self, self._cleanup_resources)
 
   # ─── 公开接口 ─────────────────────────────────────────────
@@ -212,76 +221,88 @@ class MemoryStore:
 
   @property
   def messages(self) -> List[Dict]:
-    """当前内存中的消息列表（已经过窗口截断）"""
     with self._lock:
-      return list(self._messages)  # 返回副本，防止外部修改
+      return list(self._messages)
 
   @property
   def stats(self) -> MemoryStats:
-    """获取内存统计信息"""
     with self._lock:
       self._update_stats()
       return MemoryStats(**asdict(self._stats))
 
   def get_current_state(self) -> TaskState:
-    """返回当前任务状态机（供 shell.py 注入 System Prompt）"""
     return self._task_state
 
   def update_task_state(self, goal: str, milestones: List[str], iteration: int):
-    """由 submit_plan 工具调用成功后触发，更新状态机"""
     self._task_state.update_from_plan(goal, milestones, iteration)
 
   def append(self, message: Dict):
-    """追加一条消息到内存和磁盘（增强：打重要性标签 + 增量 token 计数）"""
+    """
+    追加一条消息到内存和磁盘。
+
+    修复 P0-1：fsync 和 _save_meta 移至 _lock 释放后执行。
+      原来的实现在持有 _lock 期间调用 os.fsync()，
+      fsync 可能阻塞数秒，导致所有争抢 _lock 的线程（如 token_estimate）假死。
+    """
     if not message or not isinstance(message, dict):
       raise ValueError("消息必须是非空的字典")
 
     start_time = time.time()
+    json_line = None
+    need_save_meta = False
 
     with self._lock:
       try:
-        # ─── 增强：打重要性标签（规则引擎，零 LLM 调用）───
         tagged_message = self._tag_importance(message)
         self._messages.append(tagged_message)
 
-        # 持久化
+        # 在锁内完成序列化和内存写入
+        json_line = json.dumps(tagged_message, ensure_ascii=False, separators=(',', ':'))
+
         if self._file and not self._file.closed:
-          json_line = json.dumps(tagged_message, ensure_ascii=False, separators=(',', ':'))
           self._file.write(json_line + "\n")
+          # 不在锁内调用 fsync，仅 flush 到 OS 缓冲区
           self._file.flush()
-          os.fsync(self._file.fileno())
         else:
           self._open_file()
           if self._file:
-            json_line = json.dumps(tagged_message, ensure_ascii=False, separators=(',', ':'))
             self._file.write(json_line + "\n")
             self._file.flush()
-            os.fsync(self._file.fileno())
 
-        # 更新 meta
         self._meta.message_count += 1
         self._meta.updated_at = datetime.now(timezone.utc).isoformat()
-        self._save_meta()
+        need_save_meta = True
 
-        # ─── 增强：增量式 token 计数，立即更新缓存 ───
+        # 增量 token 计数
         delta = self._count_tokens_single(tagged_message)
         self._cached_token_estimate += delta
         self._last_token_calc_time = time.time()
 
-        # 检查是否需要截断
         self._maybe_trim()
-
-        # 更新统计
         self._stats.total_messages += 1
 
       except Exception as e:
         self._meta.last_error = str(e)
         print(f"[Memory] ❌ 追加消息失败: {e}")
         raise
-      finally:
-        duration = time.time() - start_time
-        if duration > 0.1:
-          print(f"[Memory] ⚠️  append操作耗时: {duration:.3f}s")
+
+    # ── 锁外执行耗时 I/O（修复 P0-1 关键改动）──
+    if need_save_meta:
+      try:
+        self._save_meta()
+      except Exception as e:
+        print(f"[Memory] ⚠️  保存meta失败: {e}")
+
+    # fsync 在锁外执行，即使阻塞也不会影响其他线程
+    try:
+      if self._file and not self._file.closed:
+        os.fsync(self._file.fileno())
+    except OSError:
+      pass
+
+    duration = time.time() - start_time
+    if duration > 0.1:
+      print(f"[Memory] ⚠️  append操作耗时: {duration:.3f}s")
 
   def extend(self, messages: List[Dict]):
     """批量追加消息"""
@@ -289,10 +310,10 @@ class MemoryStore:
       return
 
     start_time = time.time()
+    need_save_meta = False
 
     with self._lock:
       try:
-        # 批量写入优化
         lines = []
         for message in messages:
           if message and isinstance(message, dict):
@@ -302,17 +323,12 @@ class MemoryStore:
         if lines and self._file and not self._file.closed:
           self._file.write("\n".join(lines) + "\n")
           self._file.flush()
-          os.fsync(self._file.fileno())
 
-        # 更新 meta
         self._meta.message_count += len(messages)
         self._meta.updated_at = datetime.now(timezone.utc).isoformat()
-        self._save_meta()
+        need_save_meta = True
 
-        # 检查是否需要截断
         self._maybe_trim()
-
-        # 更新统计
         self._stats.total_messages += len(messages)
         self._last_token_calc_time = 0
 
@@ -320,39 +336,51 @@ class MemoryStore:
         self._meta.last_error = str(e)
         print(f"[Memory] ❌ 批量追加失败: {e}")
         raise
-      finally:
-        duration = time.time() - start_time
-        if duration > 0.5:  # 超过500ms记录警告
-          print(f"[Memory] ⚠️  extend操作耗时: {duration:.3f}s")
+
+    # 锁外 I/O
+    if need_save_meta:
+      try:
+        self._save_meta()
+      except Exception as e:
+        print(f"[Memory] ⚠️  保存meta失败: {e}")
+
+    try:
+      if self._file and not self._file.closed:
+        os.fsync(self._file.fileno())
+    except OSError:
+      pass
+
+    duration = time.time() - start_time
+    if duration > 0.5:
+      print(f"[Memory] ⚠️  extend操作耗时: {duration:.3f}s")
 
   def flush(self):
-    """强制刷盘"""
-    with self._file_lock:
+    """强制刷盘（修复 P1-2：统一使用 _lock，删除 _file_lock）"""
+    with self._lock:
       if self._file and not self._file.closed:
         try:
           self._file.flush()
-          os.fsync(self._file.fileno())
         except Exception as e:
-          print(f"[Memory] ⚠️  刷盘失败: {e}")
+          print(f"[Memory] ⚠️  flush失败: {e}")
+    # fsync 在锁外执行
+    try:
+      if self._file and not self._file.closed:
+        os.fsync(self._file.fileno())
+    except OSError:
+      pass
 
   def close(self):
-    """关闭内存存储，释放资源"""
     self._cleanup_resources()
 
   def token_estimate(self) -> int:
-    """返回当前 token 估算（增量维护，无需全量重算）"""
-    # 增量缓存有效时直接返回
     current_time = time.time()
     if (current_time - self._last_token_calc_time < self._TOKEN_CACHE_TTL and
         self._cached_token_estimate > 0):
       return self._cached_token_estimate
 
-    # 缓存过期或首次调用：全量精算并重置增量基线
     with self._lock:
       try:
-        total = 0
-        for m in self._messages:
-          total += self._count_tokens_single(m)
+        total = sum(self._count_tokens_single(m) for m in self._messages)
         self._cached_token_estimate = total
         self._last_token_calc_time = current_time
         return total
@@ -361,7 +389,6 @@ class MemoryStore:
         return len(self._messages) * 120
 
   def _count_tokens_single(self, message: Dict) -> int:
-    """计算单条消息的 token 数（用于增量维护）"""
     try:
       content = message.get("content", "")
       if isinstance(content, (dict, list)):
@@ -369,27 +396,16 @@ class MemoryStore:
       msg_for_count = [{"role": message.get("role", "user"), "content": str(content)}]
       return token_counter(model=self._model, messages=msg_for_count)
     except Exception:
-      # 降级估算：中文约 1.5 token/字，英文约 0.25 token/字
       content_str = str(message.get("content", ""))
       return max(4, len(content_str) // 3)
 
   def prepare_for_llm(self, keep_last_n: int = 3) -> List[Dict]:
-    """
-    增强版消息脱水：按重要性标签过滤，而非粗暴按位置截断。
-
-    标签策略：
-      ANCHOR  → 永远原文保留（submit_plan、人类最新指令）
-      DECISION→ 保留前 400 字符摘要
-      PROCESS → 活跃区（最后 keep_last_n*3 条）保留，归档区做 Skeleton
-      NOISE   → 直接丢弃
-    """
+    """增强版消息脱水：按重要性标签过滤"""
     raw_msgs = self.messages
     total_len = len(raw_msgs)
-    active_boundary = total_len - (keep_last_n * 3)  # 活跃区范围扩大，避免切断工具链
+    active_boundary = total_len - (keep_last_n * 3)
     result = []
 
-    # 预处理：建立 tool_call_id → assistant消息索引，用于成对操作
-    # key: tool_call_id, value: assistant消息在raw_msgs中的index
     tool_call_owner: Dict[str, int] = {}
     for i, msg in enumerate(raw_msgs):
       if msg.get("role") == "assistant":
@@ -399,19 +415,16 @@ class MemoryStore:
             if tc_id:
               tool_call_owner[tc_id] = i
 
-    # 找出所有需要跳过的索引（NOISE成对跳过）
     skip_indices = set()
     for i, msg in enumerate(raw_msgs):
       tag = msg.get("_importance", "PROCESS")
       role = msg.get("role", "")
       if tag == "NOISE":
         skip_indices.add(i)
-        # 如果是tool消息，同时跳过对应的assistant消息
         if role == "tool":
           tc_id = msg.get("tool_call_id", "")
           if tc_id and tc_id in tool_call_owner:
             skip_indices.add(tool_call_owner[tc_id])
-        # 如果是assistant消息（含tool_calls），同时跳过所有对应的tool消息
         if role == "assistant":
           for tc in msg.get("tool_calls", []):
             if isinstance(tc, dict):
@@ -424,17 +437,14 @@ class MemoryStore:
       tag = msg.get("_importance", "PROCESS")
       role = msg.get("role", "")
 
-      # ─── ANCHOR：永久保留原文 ───
       if tag == "ANCHOR":
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         result.append(clean)
         continue
 
-      # ─── NOISE：成对跳过 ───
       if i in skip_indices:
         continue
 
-      # ─── DECISION：保留摘要 ───
       if tag == "DECISION":
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         content = clean.get("content", "")
@@ -444,7 +454,6 @@ class MemoryStore:
         result.append(clean)
         continue
 
-      # ─── PROCESS：按区域决定处理方式 ───
       if role == "tool":
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         content_str = clean.get("content", "")
@@ -454,23 +463,18 @@ class MemoryStore:
           if artifact.get("can_dehydrate") and artifact.get("artifact_type") == "file_content":
             original_code = artifact.get("content", "")
             path = artifact.get("metadata", {}).get("path", "unknown.py")
-
             if i < active_boundary:
-              # 归档区：完全折叠
               artifact["content"] = "[SYSTEM: 已归档] 内容已移除以节省 Token，如需查看请重新调用 read_file。"
               artifact["is_dehydrated"] = True
             else:
-              # 活跃区：Skeleton 化
               skeleton = self._generate_semantic_skeleton(original_code, path)
               artifact["content"] = f"[SYSTEM: 语义骨架]\n{skeleton}"
               artifact["is_skeleton"] = True
-
             clean["content"] = json.dumps(data, ensure_ascii=False)
         except (json.JSONDecodeError, TypeError, KeyError):
           pass
         result.append(clean)
       else:
-        # 非 tool 消息：活跃区保留，归档区折叠长内容
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         if i < active_boundary:
           content = clean.get("content", "")
@@ -501,7 +505,6 @@ class MemoryStore:
           return "\n".join(outline)
       except Exception:
         pass
-    # 通用正则（支持 JS/TS/Java/Go 等）
     import re
     patterns = [
       r'^(?:export\s+)?(?:class|function|async\s+function)\s+([a-zA-Z_][a-zA-Z0-9_]*)',
@@ -519,11 +522,9 @@ class MemoryStore:
     return "\n".join(skeleton[:50]) or "[无法提取结构，仅保留前5行]\n" + "\n".join(code.split('\n')[:5])
 
   def summary_line(self) -> str:
-    """返回单行会话摘要，用于 session 列表展示"""
     with self._lock:
       if not self._messages:
         return "（空会话）"
-
       first = self._messages[0]
       content = first.get("content", "")
       if isinstance(content, list):
@@ -532,17 +533,14 @@ class MemoryStore:
         )
       return str(content)[:80]
 
-  # ─── Session 管理（静态工具方法）────────────────────────
+  # ─── Session 管理 ─────────────────────────────────────────
 
   @classmethod
   def list_sessions(cls, memory_dir: str, role_name: str) -> List[SessionMeta]:
-    """列出指定角色的所有历史 session"""
     role_dir = os.path.join(memory_dir, _safe_name(role_name))
     index_path = os.path.join(role_dir, "sessions.json")
-
     if not os.path.exists(index_path):
       return []
-
     try:
       with open(index_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -554,15 +552,11 @@ class MemoryStore:
 
   @classmethod
   def delete_session(cls, memory_dir: str, role_name: str, session_id: str):
-    """删除指定 session 的历史文件"""
     role_dir = os.path.join(memory_dir, _safe_name(role_name))
     hist_path = os.path.join(role_dir, f"{session_id}.jsonl")
-
     try:
       if os.path.exists(hist_path):
         os.remove(hist_path)
-
-      # 从索引中移除
       index_path = os.path.join(role_dir, "sessions.json")
       if os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as f:
@@ -576,27 +570,22 @@ class MemoryStore:
   # ─── 私有方法 ─────────────────────────────────────────────
 
   def _open_file(self):
-    """安全地打开文件句柄"""
-    with self._file_lock:
-      try:
-        if self._file and not self._file.closed:
-          self._file.close()
-
-        self._file_path = self._history_path()
-        self._file = open(self._file_path, "a", encoding="utf-8", buffering=1)
-
-        # 验证文件完整性
-        if os.path.exists(self._file_path):
-          self._verify_file_integrity()
-
-      except Exception as e:
-        print(f"[Memory] ❌ 打开文件失败: {e}")
-        self._file = None
-        self._file_path = None
+    """打开文件句柄（修复 P1-2：由 _lock 统一保护，不再用 _file_lock）"""
+    try:
+      if self._file and not self._file.closed:
+        self._file.close()
+      self._file_path = self._history_path()
+      self._file = open(self._file_path, "a", encoding="utf-8", buffering=1)
+      if os.path.exists(self._file_path):
+        self._verify_file_integrity()
+    except Exception as e:
+      print(f"[Memory] ❌ 打开文件失败: {e}")
+      self._file = None
+      self._file_path = None
 
   def _cleanup_resources(self):
-    """清理资源（防止内存泄漏）"""
-    with self._file_lock:
+    """清理资源（修复 P1-2：统一使用 _lock）"""
+    with self._lock:
       if self._file and not self._file.closed:
         try:
           self._file.flush()
@@ -608,31 +597,22 @@ class MemoryStore:
           self._file_path = None
 
   def _verify_file_integrity(self):
-    """验证文件完整性，检测损坏"""
     if not self._file_path or not os.path.exists(self._file_path):
       return
-
     try:
-      # 检查文件大小
       file_size = os.path.getsize(self._file_path)
-      if file_size > 100 * 1024 * 1024:  # 100MB
+      if file_size > 100 * 1024 * 1024:
         print(f"[Memory] ⚠️  文件过大: {file_size} bytes")
-
-      # 简单的JSON格式验证
       with open(self._file_path, "r", encoding="utf-8") as f:
-        line_count = 0
         for line_num, line in enumerate(f, 1):
           if line.strip():
             try:
               json.loads(line)
-              line_count += 1
             except json.JSONDecodeError:
               print(f"[Memory] ⚠️  第{line_num}行JSON格式错误")
               self._corruption_detected = True
               break
-
       self._meta.file_size = file_size
-
     except Exception as e:
       print(f"[Memory] ⚠️  文件完整性检查失败: {e}")
 
@@ -644,10 +624,8 @@ class MemoryStore:
     if not os.path.exists(path):
       print(f"[Memory] ⚠️  Session 文件不存在: {path}，从空白开始")
       return []
-
     messages = []
     backup_path = path + self._backup_suffix
-
     try:
       with open(path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
@@ -657,15 +635,9 @@ class MemoryStore:
               messages.append(json.loads(line))
             except json.JSONDecodeError as e:
               print(f"[Memory] ⚠️  第{line_num}行JSON解析错误: {e}")
-              # 跳过损坏行，但记录
-              continue
-
       return messages
-
     except Exception as e:
       print(f"[Memory] ❌ 加载session失败: {e}")
-
-      # 尝试从备份恢复
       if os.path.exists(backup_path):
         try:
           print(f"[Memory] 🔄 尝试从备份恢复: {backup_path}")
@@ -680,26 +652,22 @@ class MemoryStore:
           return messages
         except Exception as backup_e:
           print(f"[Memory] ❌ 备份恢复也失败: {backup_e}")
-
       return []
 
   def _load_or_create_meta(self) -> SessionMeta:
     index_path = os.path.join(self._role_dir, "sessions.json")
     sessions = []
-
     try:
       if os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as f:
           raw = json.load(f)
         sessions = raw.get("sessions", [])
-
         for s in sessions:
           if s["session_id"] == self._session_id:
             return SessionMeta(**s)
     except (json.JSONDecodeError, IOError) as e:
       print(f"[Memory] ⚠️  读取meta失败，重新创建: {e}")
 
-    # 新建 meta
     now = datetime.now(timezone.utc).isoformat()
     meta = SessionMeta(
         session_id=self._session_id,
@@ -709,47 +677,39 @@ class MemoryStore:
         message_count=len(self._messages),
     )
     sessions.append(asdict(meta))
-
     try:
       with open(index_path, "w", encoding="utf-8") as f:
         json.dump({"sessions": sessions}, f, ensure_ascii=False, indent=2)
     except Exception as e:
       print(f"[Memory] ⚠️  保存meta失败: {e}")
-
     return meta
 
   def _save_meta(self):
-    """原子性保存meta信息"""
+    """原子性保存meta（锁外调用，避免持锁期间做磁盘 I/O）"""
     index_path = os.path.join(self._role_dir, "sessions.json")
     temp_path = index_path + f".tmp.{int(time.time())}"
-
     try:
       sessions = []
       if os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as f:
           raw = json.load(f)
         sessions = raw.get("sessions", [])
-
-      # 更新或插入
       found = False
+      # 读取当前 meta 快照（需要加锁）
+      with self._lock:
+        meta_snapshot = asdict(self._meta)
       for i, s in enumerate(sessions):
         if s["session_id"] == self._session_id:
-          sessions[i] = asdict(self._meta)
+          sessions[i] = meta_snapshot
           found = True
           break
       if not found:
-        sessions.append(asdict(self._meta))
-
-      # 原子写入
+        sessions.append(meta_snapshot)
       with open(temp_path, "w", encoding="utf-8") as f:
         json.dump({"sessions": sessions}, f, ensure_ascii=False, indent=2)
-
-      # 原子重命名
       os.rename(temp_path, index_path)
-
     except Exception as e:
       print(f"[Memory] ⚠️  保存meta失败: {e}")
-      # 清理临时文件
       if os.path.exists(temp_path):
         try:
           os.remove(temp_path)
@@ -757,27 +717,15 @@ class MemoryStore:
           pass
 
   def _tag_importance(self, message: Dict) -> Dict:
-    """
-    规则引擎：为消息打重要性标签（零 LLM 调用）。
-    标签写入 _importance 字段（下划线前缀，prepare_for_llm 时自动剥离）。
-
-    ANCHOR  → 永远保留原文
-    DECISION→ 保留摘要（前 400 字符）
-    PROCESS → 按区域处理（活跃区 Skeleton，归档区折叠）
-    NOISE   → 直接丢弃
-    """
     tagged = dict(message)
     role = message.get("role", "")
     content = message.get("content", "")
     content_str = str(content) if not isinstance(content, str) else content
 
-    # ─── ANCHOR 规则 ───
-    # 1. 人类用户消息（始终是任务的起点和约束）
     if role == "user":
       tagged["_importance"] = "ANCHOR"
       return tagged
 
-    # 2. assistant 调用了 submit_plan
     if role == "assistant":
       tool_calls = message.get("tool_calls", [])
       if any(tc.get("function", {}).get("name") == "submit_plan"
@@ -785,26 +733,19 @@ class MemoryStore:
         tagged["_importance"] = "ANCHOR"
         return tagged
 
-    # 3. submit_plan 的工具返回结果
     if role == "tool":
       try:
         data = json.loads(content_str)
-        # 通过 tool_call_id 无法直接知道工具名，用结果结构判断
         if data.get("data", {}).get("status") == "PLAN_ACCEPTED":
           tagged["_importance"] = "ANCHOR"
           return tagged
       except (json.JSONDecodeError, AttributeError):
         pass
 
-    # ─── NOISE 规则 ───
-    # 1. 空内容的 assistant 消息（纯 tool_call，无文本）
     if role == "assistant" and not content_str.strip() and not message.get("tool_calls"):
       tagged["_importance"] = "NOISE"
       return tagged
 
-    # 2. tool 消息：重复的目录列表
-    # 注意：tool消息不能单独标NOISE，必须和对应的assistant tool_call一起处理
-    # 这里只标记，实际丢弃在 prepare_for_llm 和 _maybe_trim 中成对处理
     if role == "tool":
       try:
         data = json.loads(content_str)
@@ -815,13 +756,10 @@ class MemoryStore:
       except (json.JSONDecodeError, AttributeError):
         pass
 
-    # ─── DECISION 规则 ───
-    # 1. 有实质文本内容的 assistant 消息（分析、解释、错误诊断）
     if role == "assistant" and len(content_str.strip()) > 50:
       tagged["_importance"] = "DECISION"
       return tagged
 
-    # 2. 工具执行出错的结果
     if role == "tool":
       try:
         data = json.loads(content_str)
@@ -831,17 +769,10 @@ class MemoryStore:
       except (json.JSONDecodeError, AttributeError):
         pass
 
-    # ─── 默认：PROCESS ───
     tagged["_importance"] = "PROCESS"
     return tagged
 
   def _group_remove(self, messages: List[Dict], indices_to_remove: set) -> List[Dict]:
-    """
-    成对删除消息：删除某条消息时，自动将其配对消息也加入删除集合。
-    - 删除tool消息 → 同时删除对应assistant的tool_call消息
-    - 删除assistant消息(含tool_calls) → 同时删除所有对应tool消息
-    """
-    # 建立 tool_call_id → assistant索引 和 tool_call_id → tool消息索引
     tool_call_owner: Dict[str, int] = {}
     tool_result_index: Dict[str, int] = {}
     for i, msg in enumerate(messages):
@@ -852,7 +783,6 @@ class MemoryStore:
       if msg.get("role") == "tool" and msg.get("tool_call_id"):
         tool_result_index[msg["tool_call_id"]] = i
 
-    # 扩展删除集合，确保成对
     expanded = set(indices_to_remove)
     for idx in list(indices_to_remove):
       msg = messages[idx]
@@ -869,12 +799,10 @@ class MemoryStore:
     return [m for i, m in enumerate(messages) if i not in expanded]
 
   def _maybe_trim(self):
-    """增强版截断：先检查增量 token 估算，触发时按重要性裁剪"""
     if (len(self._messages) <= self._max_messages and
         self._cached_token_estimate <= self._max_token_budget):
       return
 
-    # 触发 trim：先做一次精确全量核算
     accurate = sum(self._count_tokens_single(m) for m in self._messages)
     self._cached_token_estimate = accurate
     self._last_token_calc_time = time.time()
@@ -882,14 +810,9 @@ class MemoryStore:
     if accurate <= self._max_token_budget and len(self._messages) <= self._max_messages:
       return
 
-    # 按重要性裁剪：优先丢弃 NOISE，再丢弃 PROCESS，保留 ANCHOR 和 DECISION
     original_count = len(self._messages)
-
-    # 第一步：丢弃所有 NOISE（成对删除）
     noise_indices = {i for i, m in enumerate(self._messages) if m.get("_importance") == "NOISE"}
     self._messages = self._group_remove(self._messages, noise_indices)
-
-    # 重新估算
     self._cached_token_estimate = sum(self._count_tokens_single(m) for m in self._messages)
 
     if (self._cached_token_estimate <= self._max_token_budget and
@@ -897,12 +820,7 @@ class MemoryStore:
       print(f"[Memory] ✂️  NOISE 清理：{original_count} → {len(self._messages)} 条")
       return
 
-    # 第二步：从最旧的 PROCESS 消息开始裁剪，保留最近 1/2
-    process_indices = [
-      i for i, m in enumerate(self._messages)
-      if m.get("_importance") == "PROCESS"
-    ]
-    # 保留后半段的 PROCESS，丢弃前半段（成对删除）
+    process_indices = [i for i, m in enumerate(self._messages) if m.get("_importance") == "PROCESS"]
     cutoff = len(process_indices) // 2
     indices_to_remove = set(process_indices[:cutoff])
     self._messages = self._group_remove(self._messages, indices_to_remove)
@@ -914,10 +832,8 @@ class MemoryStore:
     print(f"[Memory] ✂️  重要性裁剪：{original_count} → {len(self._messages)} 条")
 
   def _update_stats(self):
-    """更新统计信息"""
     self._stats.memory_messages = len(self._messages)
     self._stats.token_estimate = self.token_estimate()
-
     if self._file_path and os.path.exists(self._file_path):
       try:
         self._stats.file_size_bytes = os.path.getsize(self._file_path)
@@ -928,15 +844,11 @@ class MemoryStore:
 # ─── 工具函数 ─────────────────────────────────────────────────
 
 def _safe_name(name: str) -> str:
-  """将角色名转换为安全的目录名"""
   return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
 
 
-# ─── 上下文管理器 ─────────────────────────────────────────────
-
 @contextmanager
 def memory_store_context(*args, **kwargs):
-  """内存存储的上下文管理器，确保资源正确释放"""
   store = None
   try:
     store = MemoryStore(*args, **kwargs)
