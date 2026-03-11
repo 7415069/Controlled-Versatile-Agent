@@ -4,7 +4,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Set
 
 import yaml
 
@@ -34,24 +34,27 @@ class RoleManifest:
   escalation_policy: EscalationPolicy
   max_tokens: int = 8192
 
-  # 全量合法 capability 集合
-  VALID_CAPABILITIES = {
-    "find_symbol",
-    "get_project_summary",
-    "get_file_skeleton",
-    "list_directory",
-    "read_file",
-    "backup_file",
-    "write_file",
-    "append_file",
-    "run_shell",
-    "ask_human",
-    "search_files",
-    "http_request",
-    "submit_plan",
-    "execute_python_script",
-    "get_repo_map"
-  }
+  def _get_all_valid_capabilities(self) -> Set[str]:
+    """
+    动态获取当前系统支持的所有能力：
+    1. 内置工具 (tool.py 中的类)
+    2. 自定义工具 (var/agent/custom_tools/ 下的文件)
+    """
+    # 延迟导入，避免循环依赖
+    from core.tool import ToolLoader
+
+    # 获取内置工具名
+    builtin_caps = set(ToolLoader._get_builtin_tool_classes().keys())
+
+    # 获取自定义工具名
+    custom_dir = ToolLoader.get_custom_tools_dir()
+    custom_caps = set()
+    if os.path.exists(custom_dir):
+      for f in os.listdir(custom_dir):
+        if f.endswith(".py") and not f.startswith("__"):
+          custom_caps.add(f[:-3])
+
+    return builtin_caps | custom_caps
 
   def validate(self):
     """校验 Manifest 配置合法性"""
@@ -62,9 +65,12 @@ class RoleManifest:
     if not self.identity_prompt:
       errors.append("identity_prompt 不能为空")
 
-    invalid_caps = set(self.capabilities) - self.VALID_CAPABILITIES
+    # 核心改动：使用动态获取的集合进行校验
+    valid_set = self._get_all_valid_capabilities()
+    invalid_caps = set(self.capabilities) - valid_set
+
     if invalid_caps:
-      errors.append(f"无效的 capabilities: {invalid_caps}")
+      errors.append(f"无效或未定义的 capabilities: {invalid_caps}。请检查拼写或确认工具已合成。")
 
     if self.escalation_policy.notify_channel not in ("console", "slack", "webhook"):
       errors.append("notify_channel 必须为 console / slack / webhook 之一")

@@ -8,14 +8,18 @@
   P2-4: AskHumanTool 使用裸 input()，GUI 模式下 stdin 已被重定向会卡死。
         → 通过注入的 input_fn 调用（与 shell._safe_input 对齐）。
 """
+import ast
 import glob as glob_module
+import importlib
+import inspect
 import json
 import os
 import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Dict, Optional
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, Optional, List, Type
 
 from core.config import cva_settings
 
@@ -32,17 +36,12 @@ def err(code: str, message: str) -> Dict:
 
 # ─── 工具基类 ────────────────────────────────────────────────
 
-class Tool:
+class Tool(ABC):
   name: str = ""
   description: str = ""
   input_schema: Dict = {}
 
   def __init__(self, check_fn: Callable, input_fn: Optional[Callable] = None):
-    """
-    check_fn : escalation_manager.check 的引用
-    input_fn : 统一输入函数（GUI 模式传 shell._safe_input，CLI 模式传 None 使用内置 input）
-               修复 P2-4：AskHumanTool 通过此函数获取用户输入，避免裸 input() 在 GUI 下卡死。
-    """
     self._check = check_fn
     self._input_fn = input_fn or input
 
@@ -62,8 +61,9 @@ class Tool:
     except (ValueError, OSError):
       return None
 
+  @abstractmethod
   def execute(self, **kwargs) -> Dict:
-    raise NotImplementedError
+    pass
 
   def to_api_spec(self) -> Dict:
     return {
@@ -71,6 +71,87 @@ class Tool:
       "description": self.description,
       "input_schema": self.input_schema,
     }
+
+
+class ToolLoader:
+  """负责工具的自动发现、校验与热加载"""
+
+  @staticmethod
+  def get_custom_tools_dir() -> str:
+    custom_dir = os.path.join(cva_settings.agent_dir, "custom_tools")
+    os.makedirs(custom_dir, exist_ok=True)
+    return custom_dir
+
+  @classmethod
+  def _get_builtin_tool_classes(cls) -> Dict[str, Type[Tool]]:
+    """利用 inspect 自动扫描当前模块中所有定义的工具类"""
+    builtin_tools = {}
+    # 获取当前模块的所有成员
+    current_module = sys.modules[__name__]
+    for name, obj in inspect.getmembers(current_module):
+      # 筛选条件：是类、继承自 Tool、不是 Tool 基类本身、不是抽象类
+      if (inspect.isclass(obj) and
+          issubclass(obj, Tool) and
+          obj is not Tool and
+          not inspect.isabstract(obj)):
+
+        tool_name = getattr(obj, "name", "")
+        if tool_name:
+          builtin_tools[tool_name] = obj
+    return builtin_tools
+
+  @classmethod
+  def verify_and_load_single(cls, file_path: str, check_fn: Callable, input_fn: Callable) -> Tool:
+    """热加载单个外部工具文件并返回实例"""
+    try:
+      with open(file_path, 'r', encoding='utf-8') as f:
+        ast.parse(f.read())
+
+      module_name = f"dynamic_tool_{os.path.basename(file_path)[:-3]}"
+      spec = importlib.util.spec_from_file_location(module_name, file_path)
+      if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载模块定义: {file_path}")
+
+      mod = importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(mod)
+
+      for name, obj in inspect.getmembers(mod):
+        if inspect.isclass(obj) and issubclass(obj, Tool) and obj is not Tool:
+          return obj(check_fn, input_fn)
+
+      raise ValueError("未找到合法的 Tool 类")
+    except Exception as e:
+      raise RuntimeError(f"工具热加载失败: {e}")
+
+  @classmethod
+  def load_all(cls, capabilities: List[str], check_fn: Callable, input_fn: Callable) -> Dict[str, Tool]:
+    """全自动加载：扫描内置 + 扫描自定义目录"""
+    active_tools: Dict[str, Tool] = {}
+
+    # 1. 自动扫描内置工具
+    builtin_classes = cls._get_builtin_tool_classes()
+    for cap in capabilities:
+      if cap in builtin_classes:
+        tool_class = builtin_classes[cap]
+        # 特殊处理 SynthesizeTool，因为它需要传入 active_tools 的引用
+        if tool_class is SynthesizeTool:
+          active_tools[cap] = tool_class(check_fn, input_fn, active_tools)
+        else:
+          active_tools[cap] = tool_class(check_fn, input_fn)
+
+    # 2. 自动扫描自定义目录
+    custom_dir = cls.get_custom_tools_dir()
+    if os.path.exists(custom_dir):
+      for filename in os.listdir(custom_dir):
+        if filename.endswith(".py") and not filename.startswith("__"):
+          try:
+            inst = cls.verify_and_load_single(os.path.join(custom_dir, filename), check_fn, input_fn)
+            # 自定义工具如果不在初始 capabilities 里，通常也允许加载（进化结果）
+            active_tools[inst.name] = inst
+          except Exception as e:
+            print(f"⚠️  加载自定义工具 {filename} 失败: {e}")
+
+    return active_tools
 
 
 # ─── 具体工具实现 ─────────────────────────────────────────────
@@ -853,35 +934,53 @@ class GetRepoMapTool(Tool):
       return err("RUNTIME_ERROR", str(e))
 
 
+class SynthesizeTool(Tool):
+  name = "synthesize_tool"
+  description = "【自我进化引擎】动态编写并注册新工具。代码需继承 Tool 类并实现 execute。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "tool_name": {"type": "string"},
+      "code": {"type": "string"},
+      "reason": {"type": "string"}
+    },
+    "required": ["tool_name", "code", "reason"]
+  }
+
+  def __init__(self, check_fn: Callable, input_fn: Callable, active_tools_ref: Dict[str, Tool]):
+    super().__init__(check_fn, input_fn)
+    self._active_tools = active_tools_ref
+
+  def execute(self, tool_name: str, code: str, reason: str = "", **kwargs) -> Dict:
+    allowed, msg = self._check(self.name, tool_name, "write", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    custom_dir = ToolLoader.get_custom_tools_dir()
+    file_path = os.path.join(custom_dir, f"{tool_name}.py")
+
+    try:
+      with open(file_path, "w", encoding="utf-8") as f:
+        f.write(code)
+
+      # 联动 ToolLoader 进行单文件热加载
+      new_inst = ToolLoader.verify_and_load_single(file_path, self._check, self._input_fn)
+
+      # 实时注入工具池
+      self._active_tools[new_inst.name] = new_inst
+
+      return ok({"message": f"工具 {new_inst.name} 已合成并即时加载。"})
+    except Exception as e:
+      if os.path.exists(file_path):
+        os.remove(file_path)
+      return err("SYNTHESIZE_FAILED", str(e))
+
+
 # ─── 工具注册表 ───────────────────────────────────────────────
 
-TOOL_REGISTRY = {
-  "find_symbol": FindSymbolTool,
-  "get_project_summary": GetProjectSummaryTool,
-  "get_file_skeleton": GetFileSkeletonTool,
-  "list_directory": ListDirectoryTool,
-  "read_file": ReadFileTool,
-  "backup_file": BackupFileTool,
-  "write_file": WriteFileTool,
-  "append_file": AppendFileTool,
-  "run_shell": RunShellTool,
-  "ask_human": AskHumanTool,
-  "search_files": SearchFilesTool,
-  "http_request": HttpRequestTool,
-  "submit_plan": SubmitPlanTool,
-  "execute_python_script": ExecutePythonScriptTool,
-  "get_repo_map": GetRepoMapTool
-}
 
-
-def build_tools(capabilities: list, check_fn: Callable, input_fn: Optional[Callable] = None) -> Dict[str, "Tool"]:
+def build_tools(capabilities: list, check_fn: Callable, input_fn: Optional[Callable] = None) -> Dict[str, Tool]:
   """
-  修复 P2-4：build_tools 透传 input_fn，由 shell.py 传入 self._safe_input。
-  AskHumanTool 会使用它代替裸 input()，保证 GUI 模式下不卡死。
+  现在 build_tools 变得极其简单，全部委托给 ToolLoader
   """
-  tools = {}
-  for cap in capabilities:
-    cls = TOOL_REGISTRY.get(cap)
-    if cls:
-      tools[cap] = cls(check_fn, input_fn)
-  return tools
+  return ToolLoader.load_all(capabilities, check_fn, input_fn or input)
