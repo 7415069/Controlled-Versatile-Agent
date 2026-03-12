@@ -87,7 +87,7 @@ class PermissionChecker:
         normalized.append(p[2:])
       else:
         normalized.append(p)
-    return pathspec.PathSpec.from_lines('gitwildmatch', normalized)
+    return pathspec.PathSpec.from_lines('gitignore', normalized)
 
   def _match_spec(self, spec: pathspec.PathSpec, abs_path: str) -> bool:
     try:
