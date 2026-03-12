@@ -283,8 +283,7 @@ class CvaUltraGui:
     label.grid(row=row, column=0, padx=30, pady=(15, 0), sticky="w")
 
   def _create_entry(self, parent, placeholder, row):
-    entry = ctk.CTkEntry(parent, placeholder_text=placeholder, width=220, height=38,
-                         fg_color="#1A1B1E", border_color="#373A40", border_width=1, font=(self.font_ui_normal, 16))
+    entry = ctk.CTkEntry(parent, placeholder_text=placeholder, width=220, height=38, fg_color="#1A1B1E", border_color="#373A40", border_width=1, font=(self.font_ui_normal, 16))
     entry.insert(0, placeholder)
     entry.grid(row=row, column=0, padx=30, pady=(5, 10))
     return entry
