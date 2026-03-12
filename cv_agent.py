@@ -10,10 +10,11 @@ cv_agent.py — CVA GUI 入口
   3. UniversalShell 构造时注入 gui_approval_fn=self._gui_approval，
      EscalationManager 在需要弹窗时回调此函数，由主线程安全地显示对话框。
 """
-
+import difflib
 import queue
 import sys
 import threading
+import tkinter as tk
 from tkinter import messagebox, simpledialog
 from typing import Optional
 
@@ -32,6 +33,104 @@ COLOR_CODE_CYAN = "#9CDCFE"
 COLOR_SYS_GREEN = "#6A9955"
 
 ctk.set_appearance_mode("dark")
+
+
+class DiffDialog(ctk.CTkToplevel):
+  def __init__(self, master, title, old_content, new_content, on_close):
+    super().__init__(master)
+    self.title(title)
+    self.geometry("1200x800")
+    self.on_close = on_close  # 回调函数，返回 (bool, str)
+    self.result = (False, "User closed window")
+
+    # 允许窗口层级置顶并捕获焦点
+    self.attributes("-topmost", True)
+    self.grab_set()
+
+    # 布局配置
+    self.grid_columnconfigure(0, weight=1)
+    self.grid_columnconfigure(1, weight=1)
+    self.grid_rowconfigure(1, weight=1)
+
+    # 1. 顶部标题和说明
+    self.header = ctk.CTkLabel(self, text="⚠️ 请核对代码变更 (左侧: 旧内容 | 右侧: 新内容)", font=("Arial", 16, "bold"), text_color="#339AF0")
+    self.header.grid(row=0, column=0, columnspan=2, pady=10)
+
+    # 2. 中间双栏对比区
+    # 使用标准的 tk.Text 因为它对 Tag 高亮的支持比 CTkTextbox 更底层且稳定
+    self.left_text = tk.Text(self, bg="#1A1B1E", fg="#E9ECEF", font=("Consolas", 11), undo=False)
+    self.right_text = tk.Text(self, bg="#1A1B1E", fg="#E9ECEF", font=("Consolas", 11), undo=False)
+
+    self.left_text.grid(row=1, column=0, sticky="nsew", padx=(10, 2), pady=10)
+    self.right_text.grid(row=1, column=1, sticky="nsew", padx=(2, 10), pady=10)
+
+    # 定义高亮标签
+    self.left_text.tag_config("removed", background="#442222")  # 深红背景
+    self.right_text.tag_config("added", background="#224422")  # 深绿背景
+    self.left_text.tag_config("header", foreground="#555555")
+
+    # 3. 同步滚动逻辑
+    self.scrollbar = ctk.CTkScrollbar(self, command=self._on_scrollbar)
+    self.scrollbar.grid(row=1, column=2, sticky="ns")
+    self.left_text.config(yscrollcommand=self.scrollbar.set)
+    self.right_text.config(yscrollcommand=self.scrollbar.set)
+
+    # 4. 填充差异数据
+    self._fill_diff(old_content, new_content)
+
+    # 5. 底部按钮区
+    self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+    self.btn_frame.grid(row=2, column=0, columnspan=2, pady=20)
+
+    self.approve_btn = ctk.CTkButton(self.btn_frame, text="确认修改 (Y)", fg_color="#40C057",
+                                     command=lambda: self._finish(True, ""))
+    self.approve_btn.pack(side="left", padx=20)
+
+    self.deny_btn = ctk.CTkButton(self.btn_frame, text="拒绝修改 (N)", fg_color="#FA5252",
+                                  command=lambda: self._finish(False, "User denied changes"))
+    self.deny_btn.pack(side="left", padx=20)
+
+    # 绑定快捷键
+    self.bind("<y>", lambda e: self._finish(True, ""))
+    self.bind("<n>", lambda e: self._finish(False, "User denied changes"))
+
+  def _on_scrollbar(self, *args):
+    """同步滚动两个文本框"""
+    self.left_text.yview(*args)
+    self.right_text.yview(*args)
+
+  def _fill_diff(self, old_text, new_text):
+    s = difflib.SequenceMatcher(None, old_text.splitlines(), new_text.splitlines())
+
+    for tag, i1, i2, j1, j2 in s.get_opcodes():
+      if tag == 'equal':
+        for i in range(i1, i2):
+          line = s.a[i] + "\n"
+          self.left_text.insert("end", line)
+          self.right_text.insert("end", line)
+      elif tag == 'replace':
+        for i in range(i1, i2):
+          self.left_text.insert("end", s.a[i] + "\n", "removed")
+        for j in range(j1, j2):
+          self.right_text.insert("end", s.b[j] + "\n", "added")
+      elif tag == 'delete':
+        for i in range(i1, i2):
+          self.left_text.insert("end", s.a[i] + "\n", "removed")
+          self.right_text.insert("end", "\n")  # 保持行对齐
+      elif tag == 'insert':
+        for j in range(j1, j2):
+          self.left_text.insert("end", "\n")  # 保持行对齐
+          self.right_text.insert("end", s.b[j] + "\n", "added")
+
+    self.left_text.config(state="disabled")
+    self.right_text.config(state="disabled")
+
+  def _finish(self, approved, message):
+    self.result = (approved, message)
+    self.grab_release()
+    self.destroy()
+    if self.on_close:
+      self.on_close(self.result)
 
 
 class CvaUltraGui:
@@ -103,29 +202,54 @@ class CvaUltraGui:
       self.root.after(200, self._process_approval_requests)
 
   def _show_approval_dialog(self, req) -> tuple[bool, str]:
-    info_text = (
-      f"工具: {req.tool_name}\n类型: {req.permission_type.upper()}\n"
-      f"路径: {req.requested_path}\n\n理由: {req.reason or '未说明'}"
-    )
-    choice = messagebox.askyesnocancel(
-        title="🔐 CVA 权限申请",
-        message=info_text,
-        detail="[是] 批准  [否] 拒绝  [取消] 修改路径",
-        icon="warning",
-        parent=self.root,
-    )
-    if choice:
-      return True, ""
-    elif choice is False:
-      deny_reason = simpledialog.askstring("拒绝理由", "请输入拒绝原因:", parent=self.root)
-      return False, f"访问被拒绝: {deny_reason or ''}"
-    elif choice is None:
-      new_path = simpledialog.askstring("修改路径", "请输入批准的路径:",
-                                        initialvalue=req.requested_path, parent=self.root)
-      if new_path:
-        return True, new_path
-      return False, "路径为空，视为拒绝"
-    return False, "未知选择"
+    if hasattr(req, 'diff_data') and req.diff_data:
+      # 这里的 diff_data 应该是 (old_content, new_content) 的元组
+      old_c, new_c = req.diff_data
+
+      # 使用 threading.Event 等待用户在自定义窗口的操作
+      res_event = threading.Event()
+      final_res = [False, "Timeout"]
+
+      def on_diff_close(result):
+        final_res[0], final_res[1] = result[0], result[1]
+        res_event.set()
+
+      # 在主线程弹出 Diff 窗口
+      self.root.after(0, lambda: DiffDialog(
+          self.root,
+          f"代码变更审查: {req.requested_path}",
+          old_c, new_c,
+          on_diff_close
+      ))
+
+      # 阻塞等待用户点击按钮
+      res_event.wait()
+      return tuple(final_res)
+
+    else:
+      info_text = (
+        f"工具: {req.tool_name}\n类型: {req.permission_type.upper()}\n"
+        f"路径: {req.requested_path}\n\n理由: {req.reason or '未说明'}"
+      )
+      choice = messagebox.askyesnocancel(
+          title="🔐 CVA 权限申请",
+          message=info_text,
+          detail="[是] 批准  [否] 拒绝  [取消] 修改路径",
+          icon="warning",
+          parent=self.root,
+      )
+      if choice:
+        return True, ""
+      elif choice is False:
+        deny_reason = simpledialog.askstring("拒绝理由", "请输入拒绝原因:", parent=self.root)
+        return False, f"访问被拒绝: {deny_reason or ''}"
+      elif choice is None:
+        new_path = simpledialog.askstring("修改路径", "请输入批准的路径:",
+                                          initialvalue=req.requested_path, parent=self.root)
+        if new_path:
+          return True, new_path
+        return False, "路径为空，视为拒绝"
+      return False, "未知选择"
 
   def _setup_sidebar(self):
     self.sidebar_frame = ctk.CTkFrame(self.root, width=280, corner_radius=0, fg_color=COLOR_SIDEBAR, border_width=0)

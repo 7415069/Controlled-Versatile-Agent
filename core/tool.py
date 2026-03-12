@@ -9,6 +9,7 @@
         → 通过注入的 input_fn 调用（与 shell._safe_input 对齐）。
 """
 import ast
+import difflib
 import glob as glob_module
 import importlib
 import inspect
@@ -502,13 +503,34 @@ class WriteFileTool(Tool):
   MAX_CONTENT_SIZE = cva_settings.tool_settings.write_max_content_size
 
   def execute(self, path: str, content: str, encoding: str = "utf-8", reason: str = "", **kwargs) -> Dict:
-    allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs))
-    if not allowed:
-      return err("PERMISSION_DENIED", msg)
-
     real_path = self._secure_path(path)
     if real_path is None:
       return err("INVALID_PATH", f"路径不安全或无效: {path}")
+
+    old_content = ""
+    diff_str = None
+    if real_path and os.path.exists(real_path):
+      try:
+        with open(real_path, 'r', encoding=encoding, errors='replace') as f:
+          old_content = f.read()
+
+        # 生成统一差异文本（用于日志或控制台）
+        diff = difflib.unified_diff(
+            old_content.splitlines(keepends=True),
+            content.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            n=3
+        )
+        diff_str = "".join(diff)
+      except Exception:
+        diff_str = "[无法生成差异预览]"
+    else:
+      diff_str = f"[新文件创建] 内容长度: {len(content)} 字符"
+
+    allowed, msg = self._check(self.name, path, "write", reason, self._ctx(kwargs), diff=diff_str, diff_data=(old_content, content))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
 
     content_bytes = content.encode(encoding)
     if len(content_bytes) > self.MAX_CONTENT_SIZE:

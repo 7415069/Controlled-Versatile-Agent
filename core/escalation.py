@@ -51,6 +51,8 @@ class EscalationRequest:
   llm_pre_screen_result: Optional[str] = None
   llm_pre_screen_reason: Optional[str] = None
   expires_at: Optional[str] = None
+  diff: Optional[str] = None
+  diff_data: Optional[tuple[str, str]] = None
 
 
 @dataclass
@@ -111,7 +113,7 @@ class EscalationManager:
     """动态绑定主线程弹窗回调（GUI 启动后调用）"""
     self._gui_approval_fn = fn
 
-  def check(self, tool_name: str, target: str, permission_type: str, reason: str = "", context_summary: str = "") -> tuple[bool, Optional[str]]:
+  def check(self, tool_name: str, target: str, permission_type: str, reason: str = "", context_summary: str = "", diff: Optional[str] = None, diff_data: Optional[tuple[str, str]] = None) -> tuple[bool, Optional[str]]:
     # 1. 自动拒绝黑名单
     if self._matches_auto_deny(target):
       self._audit("AUTO_DENIED", {"tool_name": tool_name, "target": target})
@@ -136,7 +138,7 @@ class EscalationManager:
         self._revoke_expired_permission(duplicate_record)
 
     # 4. 创建越权申请
-    req = self._create_request(tool_name, target, permission_type, reason, context_summary)
+    req = self._create_request(tool_name, target, permission_type, reason, context_summary, diff, diff_data)
 
     # 5. 风险分级
     risk_level = self._classify_risk_level(tool_name, target, permission_type)
@@ -358,14 +360,16 @@ class EscalationManager:
       return self._perm.can_list(target)
     return False
 
-  def _create_request(self, tool_name, target, permission_type, reason, context_summary) -> EscalationRequest:
+  def _create_request(self, tool_name, target, permission_type, reason, context_summary, diff: Optional[str] = None, diff_data: Optional[tuple[str, str]] = None) -> EscalationRequest:
     req = EscalationRequest(
         request_id=str(uuid.uuid4()),
         tool_name=tool_name,
         requested_path=target,
         permission_type=permission_type,
         reason=reason,
-        context_summary=context_summary
+        context_summary=context_summary,
+        diff=diff,
+        diff_data=diff_data
     )
     with self._lock:
       self._pending[req.request_id] = req
