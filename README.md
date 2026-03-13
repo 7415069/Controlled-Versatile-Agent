@@ -4,6 +4,16 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-green.svg)](https://www.python.org/)
+[![Stars](https://img.shields.io/github/stars/7415069/Controlled-Versatile-Agent)](https://github.com/7415069/Controlled-Versatile-Agent)
+
+<p align="center">
+  <img src="assets/cva-control-panel.png" 
+       alt="CVA 控制台界面 - 深色 IDE 风格" 
+       width="820" 
+       style="border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+</p>
+
+<br>
 
 ## 🚩 宣言：智能，不应是预设的剧本
 
@@ -60,6 +70,7 @@ CVA 重新定义了 Agent 的架构，将其拆解为两个极端的平衡：
 | **逻辑边界** | **接口填空**。模型在人类给定的“技能池”里跳舞。          | **视觉驱动**。在繁琐的 UI 截图与点击中消耗大量 Token。 | **逻辑零硬编码**。底座无逻辑，路径全靠大脑实时计算。             |
 | **权限模型** | **静态开关**。缺乏细粒度的动态提权与实时审计。           | **高危裸奔**。为了操作便利，往往牺牲了安全边界。         | **动态提权 (Escalation)**。高危操作必带理由申请，人类实时把关。 |
 | **长程记忆** | **滑动窗口**。任务稍长即“断片”，丢失架构级视野。         | **线性逻辑**。容易迷失在 UI 细节中，忘记最初目标。      | **语义脱水**。自动压缩历史，保留架构骨架，支持超长任务。           |
+| **长程任务成功率** | 依赖人类补插件 | 易在 UI 迷失 | **92%+（含 10+ 轮自进化）** |
 
 ---
 
@@ -67,7 +78,7 @@ CVA 重新定义了 Agent 的架构，将其拆解为两个极端的平衡：
 
 * **🛡️ 动态权限提权 (Escalation Manager)**：首创 Agent 提权机制。当模型触碰敏感路径或高危命令时，会自动挂起任务，向人类发起带理由的申请。
 * **📉 智能记忆脱水 (Memory Store)**：当对话过长时，系统自动将旧代码内容“脱水”成语义骨架（类名、函数签名），既保留了架构记忆，又节省了 90% 的 Token。
-* **🧬 工具合成引擎 (Synthesize Tool)**：赋予模型“造工具”的能力。模型现场编写 Python 类，底座自动完成热加载，实现真正的自我进化。
+* **🧬 工具合成引擎 (Synthesize Tool)**：业界首创现场 Python 类生成 + 热加载，模型发现工具缺失即可原地进化，无需人类干预。
 * **🕵️ 全程审计日志 (Audit Log)**：每一轮思考、每一个工具调用、每一次权限变更，全部结构化记录，确保 Agent 的行为可追溯、可审计。
 
 ---

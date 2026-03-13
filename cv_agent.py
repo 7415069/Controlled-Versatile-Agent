@@ -136,7 +136,7 @@ class DiffDialog(ctk.CTkToplevel):
 class CvaUltraGui:
   def __init__(self, root):
     self.root = root
-    self.root.title("CVA v2 | 系统架构师控制台")
+    self.root.title("CVA | 控制台")
     self.root.geometry("1150x800")
     self.root.configure(fg_color=COLOR_BG)
 
