@@ -445,15 +445,6 @@ class MemoryStore:
       if i in skip_indices:
         continue
 
-      if tag == "DECISION":
-        clean = {k: v for k, v in msg.items() if not k.startswith("_")}
-        content = clean.get("content", "")
-        if isinstance(content, str) and len(content) > 400:
-          clean = clean.copy()
-          clean["content"] = content[:400] + "\n[SYSTEM: 内容已摘要，如需原文请重新读取]"
-        result.append(clean)
-        continue
-
       if role == "tool":
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         content_str = clean.get("content", "")
@@ -461,27 +452,37 @@ class MemoryStore:
           data = json.loads(content_str)
           artifact = data.get("data", {})
           if artifact.get("can_dehydrate") and artifact.get("artifact_type") == "file_content":
-            original_code = artifact.get("content", "")
-            path = artifact.get("metadata", {}).get("path", "unknown.py")
             if i < active_boundary:
-              artifact["content"] = "[SYSTEM: 已归档] 内容已移除以节省 Token，如需查看请重新调用 read_file。"
+              artifact["content"] = "[SYSTEM: 已归档] 内容已移除以节省 Token。"
               artifact["is_dehydrated"] = True
             else:
-              skeleton = self._generate_semantic_skeleton(original_code, path)
+              path = artifact.get("metadata", {}).get("path", "unknown.py")
+              skeleton = self._generate_semantic_skeleton(artifact.get("content", ""), path)
               artifact["content"] = f"[SYSTEM: 语义骨架]\n{skeleton}"
               artifact["is_skeleton"] = True
             clean["content"] = json.dumps(data, ensure_ascii=False)
         except (json.JSONDecodeError, TypeError, KeyError):
           pass
         result.append(clean)
-      else:
+        continue
+
+      if tag == "DECISION":
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
-        if i < active_boundary:
-          content = clean.get("content", "")
-          if isinstance(content, str) and len(content) > 300:
-            clean = clean.copy()
-            clean["content"] = content[:300] + "\n[SYSTEM: 已折叠]"
+        content = clean.get("content", "")
+        if isinstance(content, str) and len(content) > 400:
+          clean = clean.copy()
+          clean["content"] = content[:400] + "\n[SYSTEM: 内容已摘要]"
         result.append(clean)
+        continue
+
+      # 默认处理
+      clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+      if i < active_boundary and role == "assistant":
+        content = clean.get("content", "")
+        if isinstance(content, str) and len(content) > 300:
+          clean = clean.copy()
+          clean["content"] = content[:300] + "\n[SYSTEM: 已折叠]"
+      result.append(clean)
 
     return result
 
@@ -722,52 +723,43 @@ class MemoryStore:
     content = message.get("content", "")
     content_str = str(content) if not isinstance(content, str) else content
 
+    # 1. 用户消息：最高优先级
     if role == "user":
       tagged["_importance"] = "ANCHOR"
       return tagged
 
+    # 2. 助手消息
     if role == "assistant":
       tool_calls = message.get("tool_calls", [])
-      if any(tc.get("function", {}).get("name") == "submit_plan"
-             for tc in tool_calls if isinstance(tc, dict)):
+      if any(tc.get("function", {}).get("name") == "submit_plan" for tc in tool_calls if isinstance(tc, dict)):
         tagged["_importance"] = "ANCHOR"
-        return tagged
-
-    if role == "tool":
-      try:
-        data = json.loads(content_str)
-        if data.get("data", {}).get("status") == "PLAN_ACCEPTED":
-          tagged["_importance"] = "ANCHOR"
-          return tagged
-      except (json.JSONDecodeError, AttributeError):
-        pass
-
-    if role == "assistant" and not content_str.strip() and not message.get("tool_calls"):
-      tagged["_importance"] = "NOISE"
+      elif len(content_str.strip()) > 50:
+        tagged["_importance"] = "DECISION"
+      elif not content_str.strip() and not tool_calls:
+        tagged["_importance"] = "NOISE"
+      else:
+        tagged["_importance"] = "PROCESS"
       return tagged
 
+    # 3. 工具消息
     if role == "tool":
       try:
         data = json.loads(content_str)
         inner_data = data.get("data", {})
-        if "entries" in inner_data and "summary_items" not in inner_data and len(str(inner_data)) < 500:
-          tagged["_importance"] = "NOISE"
-          return tagged
-      except (json.JSONDecodeError, AttributeError):
-        pass
-
-    if role == "assistant" and len(content_str.strip()) > 50:
-      tagged["_importance"] = "DECISION"
-      return tagged
-
-    if role == "tool":
-      try:
-        data = json.loads(content_str)
-        if data.get("status") == "error":
+        # 计划确认是锚点
+        if inner_data.get("status") == "PLAN_ACCEPTED":
+          tagged["_importance"] = "ANCHOR"
+        # 错误或文件内容是重要决策依据 (DECISION)
+        elif data.get("status") == "error" or inner_data.get("artifact_type") == "file_content":
           tagged["_importance"] = "DECISION"
-          return tagged
+        # 简短的目录列表等是噪音
+        elif "entries" in inner_data and "summary_items" not in inner_data and len(str(inner_data)) < 500:
+          tagged["_importance"] = "NOISE"
+        else:
+          tagged["_importance"] = "PROCESS"
       except (json.JSONDecodeError, AttributeError):
-        pass
+        tagged["_importance"] = "PROCESS"
+      return tagged
 
     tagged["_importance"] = "PROCESS"
     return tagged
