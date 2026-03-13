@@ -1,8 +1,7 @@
 #!/bin/bash
-# brtech-fusion/package.sh
 cd $(dirname "$0") || exit
 
-echo "开始构建 brtech-fusion 底座通用包..."
+echo "开始构建 brtech-cva 底座通用包..."
 
 # 1. 清理旧产物
 rm -rf build/ dist/ *.egg-info

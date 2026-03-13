@@ -16,12 +16,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-dependencies = [
-    "customtkinter",
-    "litellm",
-    "pathspec",
-    "pyyaml",
-]
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 [project.urls]
 "Homepage" = "https://github.com/7415069/Controlled-Versatile-Agent"
