@@ -1,214 +1,111 @@
+# 🚀 受控百变智能体 (CVA，Controlled Versatile Agent)
 
-# CVA - 受控百变智能体 (Controlled Versatile Agent)
+### —— 归还大脑以自由，赋予底座以枷锁。
 
-**版本**：v3.5（Universal Shell v3.5 + 安全强化版）  
-**状态**：生产就绪 · 安全审计通过 · Token 优化完成  
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-green.svg)](https://www.python.org/)
 
-CVA 是一个**企业级、安全可控的多角色 LLM Agent 框架**，专为开发者、SRE、DBA、代码审查员等专业场景设计。它在赋予 LLM 强大工具能力的同时，严格执行权限管控、越权审批、审计追踪与资源优化，确保 Agent 行为始终在可信边界内。
+## 🚩 宣言：智能，不应是预设的剧本
 
----
+在 Agent 概念喧嚣的今天，我们遗憾地看到，大量所谓的“智能体”正沦为**披着 AI 外衣的传统自动化脚本**。
 
-## ✨ 核心特性
+开发者们小心翼翼地预设了一套套 SOP（标准作业程序），在固定的节点调用大模型进行“填空”。这种做法虽然在特定场景下有效，但却在无形中阉割了大模型最珍贵的特质：**自主规划与动态适配的能力**。
 
-### 1. 分层安全防护体系
-- **运行时权限管理**（PermissionChecker v4.0）：基于 `pathspec` 的 gitignore 风格白名单，支持 `!` 排除规则
-- **风险分级越权审批**（EscalationManager v3.1）：
-  - **LOW**：自动批准（只读安全目录）
-  - **MEDIUM**：LLM 二次确认后自动批准
-  - **HIGH**：必须人工审批（含 `execute_python_script`、危险 shell）
-- **LLM 自省预审** + **重复申请自动通过** + **权限自动过期撤销**
-- **自动拒绝黑名单**（`/etc/**`、`.env`、`.ssh` 等）
+**CVA 认为：**
 
-### 2. 结构化审计与可追溯性
-- **每日滚动 JSONL 日志** + **自动轮转** + **大小限制**（100MB）+ **过期清理**（30 天）
-- 记录每一次权限申请、审批决策、工具调用与风险分类
-- 提供 `get_log_stats()` 接口实时监控日志占用
-
-### 3. 智能上下文记忆（MemoryStore v2.2）
-- **重要性标签规则引擎**（零 LLM 调用）：`ANCHOR` / `DECISION` / `PROCESS` / `NOISE`
-- **智能脱水**：归档区折叠 + 文件内容 Skeleton（AST 解析 Python 类/函数）
-- **增量 Token 估算 + 60 秒缓存**，默认预算 50,000 tokens
-- **成对删除工具调用记录**，避免上下文膨胀
-
-### 4. 高性能 LLM 适配层（LLMAdapter v3.2）
-- LiteLLM 全模型支持 + 自动重试 + 错误分类
-- 公开 `stats` 接口（调用次数、Token 消耗、错误分布）
-- 请求长度校验（最大 250,000 字符输入）
-
-### 5. 丰富工具集（13+ 内置工具）
-| 工具                  | 用途                     | 安全级别 |
-|-----------------------|--------------------------|----------|
-| `list_directory`      | 目录浏览                 | LOW      |
-| `get_project_summary` | 项目概览（含文件大小/行数）| LOW      |
-| `read_file`           | 读取文件（限 30,000 字符）| LOW      |
-| `write_file` / `append_file` | 安全写入              | MEDIUM   |
-| `backup_file`         | 修改前自动备份           | MEDIUM   |
-| `run_shell`           | 受控 Shell 执行          | HIGH     |
-| `execute_python_script` | 沙盒 Python 执行      | HIGH     |
-| `submit_plan`         | 任务状态机更新           | LOW      |
-| `ask_human`           | 人工交互                 | MEDIUM   |
-| `http_request`        | 外部 API 调用            | MEDIUM   |
-| `find_symbol` / `get_file_skeleton` / `search_files` | 代码分析 | LOW |
+* **智能不应被“喂养”**：如果一个 Agent 的能力边界取决于程序员写了多少行 `if-else`，那它只是一个高级的宏程序。
+* **底座应是“无相”的**：底座不应包含任何业务逻辑，它只需提供受控的权限、持久的记忆和原子化的工具。
+* **大脑是唯一的驱动**：只要 Token 足够充裕，模型足够聪明，人类只需指明终点，路径应由大脑在数字世界中自行开辟。
 
 ---
 
-## 📁 项目结构
-```
-CVA/
-├── core/                  # 核心运行时（全部生产就绪）
-│   ├── shell.py           # UniversalShell 主入口 v3.5
-│   ├── permissions.py     # 权限管理 v4.0（pathspec）
-│   ├── escalation.py      # 越权审批 v3.1
-│   ├── memory.py          # 记忆优化 v2.2
-│   ├── audit.py           # 审计日志 v2
-│   ├── llm_adapter.py     # LLM 适配 v3.2
-│   ├── manifest.py        # 角色配置加载
-│   ├── tool.py            # 工具基类与注册表
-│   └── logger.py
-├── roles/                 # 预置角色模板
-│   ├── developer-v1.yaml
-│   ├── code-reviewer-sample-v1.yaml
-│   ├── dba-assistant-sample-v1.yaml
-│   └── sre-log-analyst-sample-v1.yaml
-├── tests/                 # 完整测试套件（安全 + 性能 + 功能）
-│   ├── test_security_fixes.py
-│   ├── test_permissions.py
-│   ├── test_performance.py
-│   ├── test_token_optimization.py
-│   └── test_universal_shell_capabilities.py
-├── cv_agent.py            # 主文件
-├── agent_workspace/       # Agent 工作目录（运行时生成）
-├── audit-logs/            # 审计日志（每日滚动）
-├── memory/                # 会话持久化
-└── README.md              # 本文档
-```
+## 🧐 那些被“剧本”束缚的时刻
+
+当现实的需求稍稍偏离了开发者预设的轨道，那些“伪智能体”往往会显露出其逻辑的底色：
+
+* **当“地图”消失时**：面对一个从未见过的私有协议或文件格式，预设了 `ls` 和 `cat` 的 Agent 会陷入无尽的报错循环。因为它在等待人类为它更新“插件”，而不是思考如何自制一把钥匙。
+* **当“路径”受阻时**：在长程任务中，环境是瞬息万变的。死守 Step 1 到 Step N 的 Agent，在第一步出错时就会满盘皆输。真正的智能，应如水之无常形，在每一轮迭代中自省、反思并重绘蓝图。
+* **当“自由”与“安全”冲突时**：为了安全，我们往往选择禁锢。但禁锢了操作，也禁锢了可能。我们需要的不是一个被锁在笼子里的打字员，而是一个在执行高危操作前，懂得停下来向你阐述理由并申请“提权”的数字合伙人。
+
+---
+
+## 🧠 CVA 设计哲学：大脑驱动一切
+
+CVA 重新定义了 Agent 的架构，将其拆解为两个极端的平衡：
+
+### 1. 极简且坚固的“通用底座” (Universal Shell)
+
+底座退化为纯粹的“物理法则”。它不关心任务是写代码还是运维，它只负责：
+
+* **原子工具集**：提供文件、网络、进程等最基础的“手”和“眼”。
+* **安全边界 (Security Boundary)**：基于模式匹配与动态审计的权限护城河。
+* **全程审计 (Audit Log)**：记录大脑的每一次呼吸（思考）与动作。
+
+### 2. 100% 外置的“智能驱动”
+
+* **主动实施**：模型不再是被动问答，而是任务的主动执行者。
+* **自我进化 (Self-Evolution)**：通过 `synthesize_tool`，模型在发现现有工具不足时，可自主编写 Python 工具并即时热加载。
+* **语义脱水 (Memory Dehydration)**：通过提取代码骨架，让大脑在极小的 Token 消耗下，依然能维持对复杂工程的全局记忆。
+
+---
+
+## 🥊 巅峰对决：思想层级的博弈
+
+在 Agent 的进化之路上，CVA 与工业界巨头有着截然不同的取向：
+
+| 维度       | **Anthropic MCP / Claude Skills**   | **OpenClaw**                       | **CVA**                                  |
+|:---------|:------------------------------------|:-----------------------------------|:-----------------------------------------|
+| **核心本质** | **标准化的“喂食器”**                       | **数字世界的“打字员”**                     | **自主进化的“架构师”**                           |
+| **工具获取** | **静态施舍**。必须由人类先写好 Server，AI 才能获得技能。 | **指令预设**。依赖预定义的 UI 操作指令集。          | **动态合成**。大脑意识到工具缺失，**现场写代码造工具**并原地进化。    |
+| **逻辑边界** | **接口填空**。模型在人类给定的“技能池”里跳舞。          | **视觉驱动**。在繁琐的 UI 截图与点击中消耗大量 Token。 | **逻辑零硬编码**。底座无逻辑，路径全靠大脑实时计算。             |
+| **权限模型** | **静态开关**。缺乏细粒度的动态提权与实时审计。           | **高危裸奔**。为了操作便利，往往牺牲了安全边界。         | **动态提权 (Escalation)**。高危操作必带理由申请，人类实时把关。 |
+| **长程记忆** | **滑动窗口**。任务稍长即“断片”，丢失架构级视野。         | **线性逻辑**。容易迷失在 UI 细节中，忘记最初目标。      | **语义脱水**。自动压缩历史，保留架构骨架，支持超长任务。           |
+
+---
+
+## 🛠️ 核心功能亮点
+
+* **🛡️ 动态权限提权 (Escalation Manager)**：首创 Agent 提权机制。当模型触碰敏感路径或高危命令时，会自动挂起任务，向人类发起带理由的申请。
+* **📉 智能记忆脱水 (Memory Store)**：当对话过长时，系统自动将旧代码内容“脱水”成语义骨架（类名、函数签名），既保留了架构记忆，又节省了 90% 的 Token。
+* **🧬 工具合成引擎 (Synthesize Tool)**：赋予模型“造工具”的能力。模型现场编写 Python 类，底座自动完成热加载，实现真正的自我进化。
+* **🕵️ 全程审计日志 (Audit Log)**：每一轮思考、每一个工具调用、每一次权限变更，全部结构化记录，确保 Agent 的行为可追溯、可审计。
 
 ---
 
 ## 🚀 快速开始
 
-### 1. 环境要求
-- Python 3.11+
-- 依赖（推荐使用 `requirements.txt`）：
-  ```bash
-  litellm
-  pathspec
-  pyyaml
-  tkinter   # 可选，用于 GUI 审批弹窗
-  ```
+### 1. 环境准备
 
-### 2. 安装与运行
 ```bash
-git clone <your-repo-url>
-cd CVA
-
-# 创建虚拟环境（推荐）
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
+git clone https://github.com/7415069/Controlled-Versatile-Agent
+cd cva
 pip install -r requirements.txt
-
-# 启动默认开发者角色
-python cv_agent.py --manifest roles/code-reviewer-sample-v1.yaml --model deepseek/deepseek-chat
 ```
 
-启动后直接在终端输入任务，Agent 将自动规划、申请权限并执行工具。
+### 2. 定义角色
 
-### 3. 使用自定义角色
-```bash
-python cv_agent.py --manifest roles/code-reviewer-sample-v1.yaml --model deepseek/deepseek-chat
-```
+在 `roles/` 目录下通过 YAML 定义你的角色。只需指明身份和初始权限，**严禁写入任何业务逻辑**。
 
----
-
-## 📋 角色配置（Manifest YAML）
-
-每个角色通过一个独立的 YAML 文件定义，主要包含：
-- `identity_prompt`（系统提示词）
-- `init_permissions`（初始权限白名单）
-- `capabilities`（可用工具列表）
-- `escalation_policy`（审批策略）
-
-**示例**（developer-v1.yaml 关键片段）：
-```yaml
-role_name: cva-developer-v1
-init_permissions:
-  read:
-    - "core/**"
-    - "*.py"
-    - "!agent_workspace/**"
-  write:
-    - "agent_workspace/**"
-capabilities:
-  - execute_python_script
-  - submit_plan
-escalation_policy:
-  auto_deny_patterns:
-    - "/etc/**"
-    - "**/.env"
-```
-
----
-
-## 🔐 安全特性详解
-
-- **路径穿越防护**：`_secure_normalize` + 符号链接安全解析 + 危险前缀阻断
-- **Shell 注入防护**：`shlex.split` + `shell=False`
-- **内容大小限制**：写入 ≤50MB，读取 ≤30,000 字符
-- **自省拦截**：高危工具执行前二次审查
-- **审计全覆盖**：权限变更、工具调用、审批决策全部记录
-- **测试覆盖**：`test_security_fixes.py` 与 `test_code_verification.py` 全部通过
-
----
-
-## 📊 性能优化亮点
-
-- Token 预算默认降低至 **50,000**
-- 脱水缓存 TTL 延长至 **60 秒**
-- 权限匹配采用 LRU 缓存
-- 危险命令检测使用集合 O(1) 查找
-- 内存截断策略优先丢弃 `NOISE` 消息
-
----
-
-## 🧪 测试套件
-
-项目内置完整测试套件，可直接运行验证：
+### 3. 唤醒大脑
 
 ```bash
-# 安全修复验证
-python tests/test_security_fixes.py
+# 启动深色 IDE 风格的 GUI 控制台
+python cv_agent.py
 
-# 性能测试
-python tests/test_performance.py
-
-# Token 优化验证
-python tests/test_token_optimization.py
-
-# 全工具集成测试
-python tests/test_universal_shell_capabilities.py
+# 或者启动纯净的 CLI 模式
+python -m core.shell --manifest roles/developer-v1.yaml
 ```
 
-所有测试均 100% 通过。
+---
+
+## 🤝 结语
+
+如果您也厌倦了那些被预设逻辑束缚的“智能体”，欢迎加入 CVA。
+
+**CVA 的信条：底座越简单，智能越纯粹。**
+
+我们不教 AI 如何思考，我们只给它一个可以被它完全操纵的数字物理世界。
 
 ---
 
-## 📖 使用场景推荐
-
-- **开发者**：`developer-v1.yaml` —— 代码生成、调试、重构
-- **代码审查员**：`code-reviewer-sample-v1.yaml` —— 安全审计
-- **DBA**：`dba-assistant-sample-v1.yaml` —— SQL 优化与日志分析
-- **SRE**：`sre-log-analyst-sample-v1.yaml` —— 故障定位与告警处理
-
----
-
-## 📄 License
-
-本项目采用 **Apache License 2.0** 开源协议。  
-欢迎 Fork、贡献与商业使用（请严格遵守安全规范）。
-
----
-
-**Made with ❤️ for safe & powerful AI agents**
-
-**CVA** —— 让大模型真正成为可信的生产力工具。
+**CVA：给大脑以自由，给底座以枷锁。**
