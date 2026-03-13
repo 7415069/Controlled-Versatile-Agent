@@ -20,8 +20,8 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from core.logger import install_print_capture
-from core.shell import UniversalShell
+from brtech_cva.core.logger import install_print_capture
+from brtech_cva.core.shell import UniversalShell
 
 # --- 现代配色方案 (深色 IDE 风格) ---
 COLOR_BG = "#1A1B1E"

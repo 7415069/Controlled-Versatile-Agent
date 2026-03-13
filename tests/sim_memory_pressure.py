@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 
-from core.memory import MemoryStore
+from brtech_cva.core import MemoryStore
 
 
 class TestMemoryOptimization(unittest.TestCase):

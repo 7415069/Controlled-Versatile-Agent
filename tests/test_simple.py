@@ -3,10 +3,8 @@
 简化的安全修复验证测试
 """
 
-import os
 import sys
 import tempfile
-import json
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -18,11 +16,11 @@ def test_imports():
     print("🧪 测试模块导入...")
     
     try:
-        from core.tool import RunShellTool, ReadFileTool, WriteFileTool
-        from core.permissions import PermissionChecker
-        from core.memory import MemoryStore
-        from core.llm_adapter import LLMAdapter
-        from core.manifest import Permissions, EscalationPolicy
+        from brtech_cva.core import RunShellTool, ReadFileTool, WriteFileTool
+        from brtech_cva.core import PermissionChecker
+        from brtech_cva.core import MemoryStore
+        from brtech_cva.core import LLMAdapter
+        from brtech_cva.core import Permissions, EscalationPolicy
         print("✅ 所有模块导入成功")
         return True
     except Exception as e:
@@ -34,8 +32,8 @@ def test_permission_checker():
     print("🧪 测试权限检查器...")
     
     try:
-        from core.manifest import Permissions
-        from core.permissions import PermissionChecker
+        from brtech_cva.core import Permissions
+        from brtech_cva.core import PermissionChecker
         
         perms = Permissions(
             read=["/tmp/test_safe/*"],
@@ -68,7 +66,7 @@ def test_memory_store():
     print("🧪 测试内存存储...")
     
     try:
-        from core.memory import MemoryStore
+        from brtech_cva.core import MemoryStore
         
         with tempfile.TemporaryDirectory() as temp_dir:
             memory = MemoryStore(
@@ -109,7 +107,7 @@ def test_llm_adapter():
     print("🧪 测试LLM适配器...")
     
     try:
-        from core.llm_adapter import LLMAdapter
+        from brtech_cva.core import LLMAdapter
         
         # 创建适配器（使用无效模型来测试错误处理）
         adapter = LLMAdapter("invalid-model-name", max_retries=1, retry_delay=0.1)
@@ -131,7 +129,7 @@ def test_file_tools():
     print("🧪 测试文件工具...")
     
     try:
-        from core.tool import ReadFileTool, WriteFileTool
+        from brtech_cva.core import ReadFileTool, WriteFileTool
         
         class MockChecker:
             def check(self, tool_name, target, permission_type, reason, context):

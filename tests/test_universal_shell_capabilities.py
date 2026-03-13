@@ -20,8 +20,8 @@ else:
   sys.path.insert(0, str(Path(__file__).parent))
 
 # 从核心模块导入必要的类
-from core.shell import UniversalShell
-from core.llm_adapter import LLMResponse, ToolCall, LLMError, LLMErrorType, CallStats
+from brtech_cva.core import UniversalShell
+from brtech_cva.core import LLMResponse, ToolCall, LLMError, LLMErrorType, CallStats
 
 
 # --- 1. 模拟 LLMAdapter 类 ---

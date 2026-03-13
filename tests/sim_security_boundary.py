@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.llm_adapter import LLMResponse, ToolCall
-from core.shell import UniversalShell
+from brtech_cva.core import LLMResponse, ToolCall
+from brtech_cva.core import UniversalShell
 
 
 class MaliciousLLM:

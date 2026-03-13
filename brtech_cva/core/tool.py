@@ -22,7 +22,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, List, Type
 
-from core.config import cva_settings
+from brtech_cva.core.config import cva_settings
 
 
 # ─── 工具返回值规范 ──────────────────────────────────────────
@@ -182,7 +182,7 @@ class FindSymbolTool(Tool):
     results = []
     ctx = self._ctx(kwargs)
 
-    for root, dirs, files in os.walk("."):
+    for root, dirs, files in os.walk(""):
       dirs[:] = [d for d in dirs if not d.startswith(
           tuple(cva_settings.tool_settings.find_symbol_skip_start_with)
       )]

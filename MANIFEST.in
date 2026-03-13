@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include cv_agent.py
+recursive-include core *
+recursive-include roles *
+

@@ -11,11 +11,10 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from core.permissions import PermissionChecker
-from core.memory import MemoryStore
-from core.manifest import Permissions
+from brtech_cva.core import PermissionChecker
+from brtech_cva.core import MemoryStore
+from brtech_cva.core import Permissions
 import tempfile
-import os
 
 
 def test_permission_cache_performance():

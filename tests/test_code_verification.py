@@ -4,11 +4,8 @@
 验证安全修复的代码逻辑是否正确
 """
 
-import os
 import sys
 import tempfile
-import json
-import re
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -21,7 +18,7 @@ def test_shell_injection_fix():
     
     try:
         import shlex
-        from core.tool import RunShellTool
+        from brtech_cva.core import RunShellTool
         
         # 模拟权限检查器
         class MockChecker:
@@ -60,8 +57,8 @@ def test_path_security_fix():
     print("🧪 验证路径安全修复...")
     
     try:
-        from core.permissions import PermissionChecker
-        from core.manifest import Permissions
+        from brtech_cva.core import PermissionChecker
+        from brtech_cva.core import Permissions
         
         perms = Permissions(
             read=["/tmp/test_safe/*"],
@@ -115,7 +112,7 @@ def test_memory_safety_fix():
     print("🧪 验证内存安全修复...")
     
     try:
-        from core.memory import MemoryStore
+        from brtech_cva.core import MemoryStore
         
         with tempfile.TemporaryDirectory() as temp_dir:
             # 创建内存存储
@@ -166,7 +163,7 @@ def test_llm_adapter_error_handling():
     print("🧪 验证LLM适配器错误处理修复...")
     
     try:
-        from core.llm_adapter import LLMAdapter, LLMErrorType
+        from brtech_cva.core import LLMAdapter, LLMErrorType
         
         # 创建适配器
         adapter = LLMAdapter("invalid-model-name", max_retries=2, retry_delay=0.1)
@@ -214,7 +211,7 @@ def test_file_operations_security():
     print("🧪 验证文件操作安全修复...")
     
     try:
-        from core.tool import ReadFileTool, WriteFileTool
+        from brtech_cva.core import ReadFileTool, WriteFileTool
         
         # 模拟权限检查器
         class MockChecker:

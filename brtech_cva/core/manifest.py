@@ -41,7 +41,7 @@ class RoleManifest:
     2. 自定义工具 (var/agent/custom_tools/ 下的文件)
     """
     # 延迟导入，避免循环依赖
-    from core.tool import ToolLoader
+    from brtech_cva.core.tool import ToolLoader
 
     # 获取内置工具名
     builtin_caps = set(ToolLoader._get_builtin_tool_classes().keys())

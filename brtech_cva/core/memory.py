@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Any
 
 from litellm import token_counter
 
-from core.config import cva_settings
+from brtech_cva.core.config import cva_settings
 
 # ─── 常量 ─────────────────────────────────────────────────────
 

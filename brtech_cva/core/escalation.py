@@ -22,8 +22,8 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
-from core.manifest import EscalationPolicy
-from core.permissions import PermissionChecker
+from brtech_cva.core.manifest import EscalationPolicy
+from brtech_cva.core.permissions import PermissionChecker
 
 
 class EscalationStatus(Enum):

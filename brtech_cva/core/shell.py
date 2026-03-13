@@ -22,19 +22,19 @@ import unicodedata
 import uuid
 from typing import Callable, Dict, List, Optional
 
-from core.audit import AuditLogger
-from core.config import cva_settings
-from core.escalation import EscalationManager, PreScreenResult
-from core.llm_adapter import (
+from brtech_cva.core.audit import AuditLogger
+from brtech_cva.core.config import cva_settings
+from brtech_cva.core.escalation import EscalationManager, PreScreenResult
+from brtech_cva.core.llm_adapter import (
   LLMAdapter,
   convert_assistant_with_tools_to_litellm,
   convert_tool_result_to_litellm,
 )
-from core.logger import sys_logger
-from core.manifest import load_manifest, RoleManifest
-from core.memory import MemoryStore
-from core.permissions import PermissionChecker
-from core.tool import build_tools
+from brtech_cva.core.logger import sys_logger
+from brtech_cva.core.manifest import load_manifest, RoleManifest
+from brtech_cva.core.memory import MemoryStore
+from brtech_cva.core.permissions import PermissionChecker
+from brtech_cva.core.tool import build_tools
 
 
 class UniversalShell:

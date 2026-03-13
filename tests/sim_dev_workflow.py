@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 # 导入必要的类型
-from core.llm_adapter import LLMResponse, ToolCall, CallStats
-from core.shell import UniversalShell
+from brtech_cva.core import LLMResponse, ToolCall, CallStats
+from brtech_cva.core import UniversalShell
 
 
 class MockLLMForDev:

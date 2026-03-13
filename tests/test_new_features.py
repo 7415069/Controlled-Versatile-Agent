@@ -6,18 +6,16 @@
 import os
 import sys
 import tempfile
-import json
-import time
 from pathlib import Path
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from core.permissions import PermissionChecker
-from core.escalation import EscalationManager
-from core.audit import AuditLogger
-from core.manifest import Permissions, EscalationPolicy
+from brtech_cva.core import PermissionChecker
+from brtech_cva.core import EscalationManager
+from brtech_cva.core import AuditLogger
+from brtech_cva.core import Permissions, EscalationPolicy
 
 
 def test_permission_revoke():

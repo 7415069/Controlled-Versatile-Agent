@@ -12,9 +12,9 @@ from pathlib import Path
 # Add project root to sys.path to allow importing core modules
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.tool import ReadFileTool
-from core.memory import MemoryStore
-from core.shell import UniversalShell
+from brtech_cva.core import ReadFileTool
+from brtech_cva.core import MemoryStore
+from brtech_cva.core import UniversalShell
 
 
 def test_file_read_limit():

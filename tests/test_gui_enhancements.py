@@ -4,9 +4,7 @@ GUI增强功能测试脚本
 测试多屏幕居中和输入接管功能
 """
 
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -18,9 +16,9 @@ def test_gui_dialog_centering():
     print("🧪 测试GUI对话框居中功能...")
 
     try:
-        from core.escalation import EscalationManager
-        from core.manifest import EscalationPolicy, Permissions
-        from core.permissions import PermissionChecker
+        from brtech_cva.core import EscalationManager
+        from brtech_cva.core import EscalationPolicy, Permissions
+        from brtech_cva.core import PermissionChecker
 
         # 创建测试用的策略和权限检查器
         policy = EscalationPolicy(
@@ -73,7 +71,7 @@ def test_custom_dialog():
     print("\n🧪 测试自定义对话框功能...")
 
     try:
-        from core.escalation import EscalationManager
+        from brtech_cva.core import EscalationManager
 
         # 检查自定义对话框方法是否存在
         if hasattr(EscalationManager, '_show_custom_dialog'):

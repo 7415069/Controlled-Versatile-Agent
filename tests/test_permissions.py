@@ -2,8 +2,8 @@
 import pytest
 from hypothesis import given, strategies as st
 
-from core.manifest import Permissions
-from core.permissions import PermissionChecker
+from brtech_cva.core import Permissions
+from brtech_cva.core import PermissionChecker
 
 
 @pytest.fixture

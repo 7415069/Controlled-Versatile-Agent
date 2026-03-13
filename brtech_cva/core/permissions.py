@@ -11,8 +11,8 @@ from typing import List, Dict, Optional, Union
 
 import pathspec
 
-from core.config import cva_settings
-from core.manifest import Permissions
+from brtech_cva.core.config import cva_settings
+from brtech_cva.core.manifest import Permissions
 
 # 链式执行符：出现任意一个就拒绝整条命令
 _CHAIN_OPERATORS = {";", "&&", "||", "|", "`", "$("}
@@ -32,7 +32,7 @@ class PermissionChecker:
     self._lock = threading.RLock()
 
     # 工作根目录（相对路径基准）
-    self._root = os.path.abspath('.')
+    self._root = os.path.abspath('')
 
     # 危险路径前缀（_secure_normalize 安全检查用）
     self._dangerous_path_prefixes = {

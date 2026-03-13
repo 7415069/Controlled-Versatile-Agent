@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict
 
-from core.config import cva_settings
+from brtech_cva.core.config import cva_settings
 
 
 class AuditLogger:

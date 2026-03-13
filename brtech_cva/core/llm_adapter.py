@@ -16,8 +16,8 @@ from typing import Dict, List, Optional, TypeVar, cast, Any
 import litellm
 from litellm import completion
 
-from core.config import cva_settings
-from core.logger import trace_logger
+from brtech_cva.core.config import cva_settings
+from brtech_cva.core.logger import trace_logger
 
 logger = logging.getLogger(__name__)
 litellm.set_verbose = False
