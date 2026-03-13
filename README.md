@@ -90,7 +90,7 @@ CVA 重新定义了 Agent 的架构，将其拆解为两个极端的平衡：
 
 ```bash
 git clone https://github.com/7415069/Controlled-Versatile-Agent
-cd cva
+pip-compile --no-emit-index-url --no-emit-trusted-host requirements.in
 pip install -r requirements.txt
 ```
 
