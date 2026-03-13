@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "brtech-cva"  # PyPI 上的安装名：pip install brtech-cva
+name = "brtech-cva"
 version = "1.0.0"
 authors = [
     { name = "Huangyun", email = "gzhyun@gmail.com" },
@@ -11,32 +11,28 @@ authors = [
 description = "努力做一个数字人，坚决不做 NPC"
 readme = "README.md"
 requires-python = ">=3.11"
+#license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-# 依赖项（建议直接写在这里，或者从 requirements.txt 读取）
 dependencies = [
     "customtkinter",
     "litellm",
     "pathspec",
     "pyyaml",
-    "pathspec",
-    # 其他 requirements.txt 里的库...
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/7415069/Controlled-Versatile-Agent"
 
-# 定义命令行工具：安装后直接运行 cva 即可启动
 [project.scripts]
 cva = "brtech_cva.cv_agent:main"
 
 [tool.setuptools]
-# 自动发现 brtech_cva 文件夹
-packages = ["brtech_cva", "brtech_cva.core"]
+# 修正：显式列出所有包，包括 roles
+packages = ["brtech_cva", "brtech_cva.core", "brtech_cva.roles"]
 
 [tool.setuptools.package-data]
-# 包含 roles 文件夹下的所有 YAML 配置文件
+# 确保 YAML 文件被包含
 "brtech_cva.roles" = ["*.yaml", "*.yml"]
