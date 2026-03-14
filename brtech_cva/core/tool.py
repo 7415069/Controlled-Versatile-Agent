@@ -9,6 +9,7 @@
         → 通过注入的 input_fn 调用（与 shell._safe_input 对齐）。
 """
 import ast
+import base64
 import difflib
 import glob as glob_module
 import importlib
@@ -20,7 +21,12 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, List, Type
+
+import pyautogui
+from PIL import Image, ImageDraw
 
 from brtech_cva.core.config import cva_settings
 
@@ -996,6 +1002,145 @@ class SynthesizeTool(Tool):
       if os.path.exists(file_path):
         os.remove(file_path)
       return err("SYNTHESIZE_FAILED", str(e))
+
+
+class ScreenshotTool(Tool):
+  """高级屏幕截图工具：支持虚拟鼠标绘制与等比例填充"""
+  name = "take_screenshot"
+  description = "获取当前屏幕截图。图片会自动处理为 1024x1024 坐标系，并标注当前鼠标位置。"
+
+  def execute(self, reason: str = "观察屏幕状态", **kwargs):
+    allowed, msg = self._check(self.name, "screenshot", "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    try:
+      # 1. 获取原始全屏截图
+      screenshot = pyautogui.screenshot()
+      sw, sh = screenshot.size
+
+      # 2. 获取当前鼠标位置
+      mx, my = pyautogui.position()
+
+      # 3. 在截图上绘制一个虚拟鼠标（红点），方便 LLM 感知位置
+      draw = ImageDraw.Draw(screenshot)
+      radius = 10
+      draw.ellipse((mx - radius, my - radius, mx + radius, my + radius), fill="red", outline="white")
+
+      # 4. 等比例缩放至 1024 边长 (Letterbox 处理)
+      # 这样 LLM 看到的 (512, 512) 永远是图片中心，也对应屏幕中心
+      target_size = 1024
+      ratio = min(target_size / sw, target_size / sh)
+      new_w, new_h = int(sw * ratio), int(sh * ratio)
+
+      # 使用高质量缩放算法
+      resized_img = screenshot.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+      # 创建 1024x1024 的黑色背景画布
+      final_canvas = Image.new("RGB", (target_size, target_size), (0, 0, 0))
+      # 将缩放后的图片居中贴上去
+      offset_x = (target_size - new_w) // 2
+      offset_y = (target_size - new_h) // 2
+      final_canvas.paste(resized_img, (offset_x, offset_y))
+
+      # 5. 保存与转码
+      timestamp = int(time.time())
+      save_path = Path(f"var/artifacts/screenshot_{timestamp}.jpg")
+      save_path.parent.mkdir(parents=True, exist_ok=True)
+      final_canvas.save(save_path, "JPEG", quality=85)  # 质量 85 是体积与清晰度的平衡点
+
+      buffered = BytesIO()
+      final_canvas.save(buffered, format="JPEG", quality=85)
+      img_str = base64.b64encode(buffered.getvalue()).decode()
+
+      return {
+        "status": "ok",
+        "data": {
+          "artifact_type": "image",
+          "path": str(save_path),
+          "base64": img_str,
+          "size": [target_size, target_size],
+          "real_screen_size": [sw, sh],
+          "can_dehydrate": True
+        }
+      }
+    except Exception as e:
+      return {"status": "error", "message": str(e)}
+
+
+class ComputerControlTool(Tool):
+  """计算机控制工具：模拟鼠标键盘"""
+  name = "computer_control"
+  description = "控制鼠标和键盘。坐标系固定为 1024x1024，系统会自动映射到真实屏幕像素。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["move", "click", "double_click", "right_click", "type", "key", "scroll"],
+        "description": "执行的动作类型"
+      },
+      "x": {"type": "integer", "description": "1024坐标系下的横坐标 (0-1024)"},
+      "y": {"type": "integer", "description": "1024坐标系下的纵坐标 (0-1024)"},
+      "text": {"type": "string", "description": "type 动作输入的文本"},
+      "key": {"type": "string", "description": "key 动作按下的键名"},
+      "reason": {"type": "string", "description": "执行此操作的原因"}
+    },
+    "required": ["action", "reason"]
+  }
+
+  def execute(self, action: str, x: int = None, y: int = None, text: str = None, key: str = None, reason: str = "", **kwargs):
+    target_desc = f"{action}(x={x}, y={y}, text={text}, key={key})"
+    allowed, msg = self._check(self.name, target_desc, "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+
+    try:
+      pyautogui.PAUSE = 0.2
+
+      # --- 核心映射逻辑开始 ---
+      # 1. 获取真实屏幕尺寸 (例如 1920x1080)
+      sw, sh = pyautogui.size()
+
+      # 2. 计算截图时使用的缩放比例和偏移量 (必须与 ScreenshotTool 逻辑完全一致)
+      target_canvas_size = 1024
+      ratio = min(target_canvas_size / sw, target_canvas_size / sh)
+
+      offset_x = (target_canvas_size - (sw * ratio)) // 2
+      offset_y = (target_canvas_size - (sh * ratio)) // 2
+
+      # 3. 将 LLM 传来的坐标 (x, y) 映射回真实像素
+      real_x, real_y = None, None
+      if x is not None and y is not None:
+        # 公式：真实像素 = (LLM坐标 - 偏移量) / 缩放比例
+        real_x = int((x - offset_x) / ratio)
+        real_y = int((y - offset_y) / ratio)
+
+        # 边界检查：防止点到屏幕外面
+        real_x = max(0, min(sw - 1, real_x))
+        real_y = max(0, min(sh - 1, real_y))
+      # --- 核心映射逻辑结束 ---
+
+      # 执行动作
+      if action == "move":
+        pyautogui.moveTo(real_x, real_y)
+      elif action == "click":
+        pyautogui.click(real_x, real_y)
+      elif action == "double_click":
+        pyautogui.doubleClick(real_x, real_y)
+      elif action == "right_click":
+        pyautogui.rightClick(real_x, real_y)
+      elif action == "type":
+        pyautogui.write(text, interval=0.05)
+      elif action == "key":
+        pyautogui.press(key)
+      elif action == "scroll":
+        # 这里的 x 被复用为滚动量
+        pyautogui.scroll(x if x else -10)
+
+      return ok({"message": f"已在真实坐标 ({real_x}, {real_y}) 执行 {action}"})
+    except Exception as e:
+      return err("GUI_ERROR", str(e))
 
 
 # ─── 工具注册表 ───────────────────────────────────────────────

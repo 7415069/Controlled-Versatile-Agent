@@ -6,3 +6,5 @@ pytest
 hypothesis
 pathspec
 customtkinter
+pyautogui
+pillow

@@ -347,8 +347,17 @@ class UniversalShell:
       - 提示：底座会自动对旧消息历史进行脱水，如需查看完整代码请重新 read_file。
     """).strip()
 
+    gui_hint = ""
+    if "computer_control" in self._manifest.capabilities:
+      gui_hint = textwrap.dedent("""
+            ### 🖥️ GUI 操作指南
+            - 屏幕截图已缩放至 1024x1024 归一化坐标系。
+            - 使用 computer_control 时，请确保坐标在屏幕范围内。
+            - 在点击前，建议先调用 take_screenshot 确认目标位置。
+        """).strip()
+
     task_state_block = self._memory.get_current_state().to_prompt_block()
-    parts = [effective_prompt, cost_report, law_prompt]
+    parts = [effective_prompt, cost_report, law_prompt, gui_hint]
     if task_state_block:
       parts.append(task_state_block)
 

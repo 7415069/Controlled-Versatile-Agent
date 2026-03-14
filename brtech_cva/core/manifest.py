@@ -18,10 +18,11 @@ class EscalationPolicy:
 
 @dataclass
 class Permissions:
-  list: List[str] = field(default_factory=list)
-  read: List[str] = field(default_factory=list)
-  write: List[str] = field(default_factory=list)
-  shell: List[str] = field(default_factory=list)
+  list: List[str] = field(default_factory=lambda: [])
+  read: List[str] = field(default_factory=lambda: [])
+  write: List[str] = field(default_factory=lambda: [])
+  shell: List[str] = field(default_factory=lambda: [])
+  gui_control: List[str] = field(default_factory=lambda: [])
 
 
 @dataclass
@@ -90,10 +91,11 @@ def load_manifest(path: str) -> RoleManifest:
   # 解析 permissions
   perm_raw = raw.get("init_permissions", {})
   permissions = Permissions(
-      list=perm_raw.get("list", []),  # ← 修复：补全缺失的 list 字段
+      list=perm_raw.get("list", []),
       read=perm_raw.get("read", []),
       write=perm_raw.get("write", []),
       shell=perm_raw.get("shell", []),
+      gui_control=perm_raw.get("gui_control", []),
   )
 
   # 解析 escalation_policy

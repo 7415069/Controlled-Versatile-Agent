@@ -400,7 +400,10 @@ class MemoryStore:
       return max(4, len(content_str) // 3)
 
   def prepare_for_llm(self, keep_last_n: int = 3) -> List[Dict]:
-    """增强版消息脱水：按重要性标签过滤"""
+    """
+    增强版消息脱水：按重要性标签过滤 + 图片去重 [MODIFIED]
+    保留了原有的 ANCHOR/DECISION/PROCESS/NOISE 逻辑和代码骨架提取。
+    """
     raw_msgs = self.messages
     total_len = len(raw_msgs)
     active_boundary = total_len - (keep_last_n * 3)
@@ -433,6 +436,12 @@ class MemoryStore:
                 if other.get("role") == "tool" and other.get("tool_call_id") == tc_id:
                   skip_indices.add(j)
 
+    last_image_idx = -1
+    for i in range(total_len - 1, -1, -1):
+      if '"artifact_type": "image"' in str(raw_msgs[i].get("content", "")):
+        last_image_idx = i
+        break
+
     for i, msg in enumerate(raw_msgs):
       tag = msg.get("_importance", "PROCESS")
       role = msg.get("role", "")
@@ -448,9 +457,11 @@ class MemoryStore:
       if role == "tool":
         clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         content_str = clean.get("content", "")
+
         try:
           data = json.loads(content_str)
           artifact = data.get("data", {})
+
           if artifact.get("can_dehydrate") and artifact.get("artifact_type") == "file_content":
             if i < active_boundary:
               artifact["content"] = "[SYSTEM: 已归档] 内容已移除以节省 Token。"
@@ -461,8 +472,17 @@ class MemoryStore:
               artifact["content"] = f"[SYSTEM: 语义骨架]\n{skeleton}"
               artifact["is_skeleton"] = True
             clean["content"] = json.dumps(data, ensure_ascii=False)
+
+          elif artifact.get("artifact_type") == "image":
+            if i != last_image_idx:
+              # 如果不是最后一张图，把巨大的 base64 删掉，只留个标记
+              artifact["base64"] = "[DEHYDRATED]"
+              artifact["is_dehydrated"] = True
+              clean["content"] = json.dumps(data, ensure_ascii=False)
+
         except (json.JSONDecodeError, TypeError, KeyError):
           pass
+
         result.append(clean)
         continue
 
@@ -475,7 +495,6 @@ class MemoryStore:
         result.append(clean)
         continue
 
-      # 默认处理
       clean = {k: v for k, v in msg.items() if not k.startswith("_")}
       if i < active_boundary and role == "assistant":
         content = clean.get("content", "")

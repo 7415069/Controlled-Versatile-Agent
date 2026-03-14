@@ -169,7 +169,28 @@ class LLMAdapter:
     return None, last_error
 
   def _do_chat_call(self, messages, system_prompt, tools, max_tokens, temperature):
-    full_messages = [{"role": "system", "content": system_prompt}] + messages
+    processed_messages = []
+    for msg in messages:
+      # 如果是工具返回的图片结果
+      if msg["role"] == "tool" and '"artifact_type": "image"' in str(msg["content"]):
+        try:
+          import json
+          data = json.loads(msg["content"])
+          b64 = data["data"]["base64"]
+          # 转换为多模态格式 [关键！]
+          processed_messages.append({
+            "role": "tool",
+            "tool_call_id": msg["tool_call_id"],
+            "content": [
+              {"type": "text", "text": "这是当前的屏幕截图："},
+              {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]
+          })
+          continue
+        except:
+          pass
+      processed_messages.append(msg)
+    full_messages = [{"role": "system", "content": system_prompt}] + processed_messages
     kwargs = {
       "model": self._model,
       "messages": full_messages,
@@ -205,9 +226,17 @@ class LLMAdapter:
     total_length = len(system_prompt)
     for msg in messages:
       content = msg.get("content", "")
-      total_length += len(str(content))
-      if total_length > self._max_input_length:
-        return f"总长度超过限制: {total_length} > {self._max_input_length}"
+      if isinstance(content, list):  # 处理多模态列表 [NEW]
+        for item in content:
+          if item.get("type") == "text":
+            total_length += len(item.get("text", ""))
+          elif item.get("type") == "image_url":
+            total_length += 1000  # 图片按 1000 字符估算，不要按 Base64 长度算
+      else:
+        total_length += len(str(content))
+
+    if total_length > self._max_input_length:
+      return f"总长度超过限制: {total_length} > {self._max_input_length}"
     return None
 
   def _validate_structured_request(self, messages, system_prompt, output_schema, function_name, max_tokens):

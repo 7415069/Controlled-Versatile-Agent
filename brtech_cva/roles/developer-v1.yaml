@@ -55,6 +55,11 @@ init_permissions:
     - "grep"
     - "find"
     - "sed"
+  gui_control:
+    - "screenshot"
+    - "click"
+    - "key"
+    - "type"
 
 capabilities:
   - find_symbol
@@ -72,6 +77,8 @@ capabilities:
   - submit_plan
   - execute_python_script
   - get_repo_map
+  - take_screenshot
+  - computer_control
 
 escalation_policy:
   auto_deny_patterns:

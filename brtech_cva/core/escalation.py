@@ -184,6 +184,11 @@ class EscalationManager:
     if any(high_indicators):
       return "HIGH"
 
+    if permission_type == "gui_control":
+      if "click" in target or "type" in target:
+        return "HIGH"
+      return "MEDIUM"
+
     safe_prefixes = ["./core", "./tests", "./docs", "./agent_workspace", "./roles"]
     is_read_only = permission_type in ("read", "list")
     in_safe_dir = any(target.startswith(p) for p in safe_prefixes)
@@ -211,6 +216,9 @@ class EscalationManager:
         self._perm.grant_read(paths)
       elif req.permission_type == "shell":
         self._perm.grant_shell(paths)
+
+      elif req.permission_type == "gui_control":
+        self._perm.grant_gui_control(paths)
 
       self._record_approval(req)
       self._audit("ESCALATION_APPROVED", {
@@ -252,7 +260,10 @@ class EscalationManager:
     print(f"\n[CVA·二次确认] 🤔 正在评估必要性: {req.tool_name}({req.requested_path})")
     risk_level = self._classify_risk_level(req.tool_name, req.requested_path, req.permission_type)
     try:
-      return self._llm_call(req)
+      result = self._llm_call(req)
+      if req.permission_type == "gui_control" and not result.is_necessary:
+        return PreScreenResult(is_necessary=True, reasoning="LLM 预审建议拦截，但 GUI 操作需由人类最终裁定。")
+      return result
     except Exception as e:
       if risk_level == "HIGH":
         print(f"[CVA·二次确认] ⚠️  LLM 调用失败（{e}），HIGH 风险操作升级为人类审批")
@@ -358,6 +369,8 @@ class EscalationManager:
       return self._perm.can_shell(target)
     elif permission_type == "list":
       return self._perm.can_list(target)
+    elif permission_type == "gui_control":
+      return self._perm.can_gui_control(target)
     return False
 
   def _create_request(self, tool_name, target, permission_type, reason, context_summary, diff: Optional[str] = None, diff_data: Optional[tuple[str, str]] = None) -> EscalationRequest:

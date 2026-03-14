@@ -53,12 +53,14 @@ class PermissionChecker:
     self._init_read_patterns: List[str] = list(init_permissions.read)
     self._init_write_patterns: List[str] = list(init_permissions.write)
     self._init_shell_prefixes: List[str] = list(init_permissions.shell)
+    self._init_gui_patterns: List[str] = getattr(init_permissions, 'gui_control', [])
 
     # 运行时可变的模式列表
     self._list_patterns: List[str] = list(self._init_list_patterns)
     self._read_patterns: List[str] = list(self._init_read_patterns)
     self._write_patterns: List[str] = list(self._init_write_patterns)
     self._shell_prefixes: List[str] = list(self._init_shell_prefixes)
+    self._gui_patterns: List[str] = list(self._init_gui_patterns)
 
     # 构建 pathspec 对象
     self._list_spec = self._build_spec(self._list_patterns)
@@ -128,6 +130,19 @@ class PermissionChecker:
 
     self._cache_misses += 1
     result = self._evaluate_shell(command)
+    self._update_cache(cache_key, result)
+    return result
+
+  def can_gui_control(self, action_desc: str) -> bool:
+    cache_key = f'gui:{action_desc}'
+    with self._lock:
+      if cache_key in self._permission_cache:
+        return self._permission_cache[cache_key]
+
+    result = "*" in self._gui_patterns or any(
+        action_desc.startswith(p) for p in self._gui_patterns
+    )
+
     self._update_cache(cache_key, result)
     return result
 
@@ -213,6 +228,12 @@ class PermissionChecker:
       if added:
         self._clear_cache_for_type('shell')
         self._record_permission_change('grant_shell', added)
+
+  def grant_gui_control(self, actions: List[str]):
+    with self._lock:
+      self._gui_patterns.extend(actions)
+      self._clear_cache_for_type('gui')
+      self._record_permission_change('grant_gui_control', actions)
 
   # ─── 权限撤销 ──────────────────────────────────────────────
 
