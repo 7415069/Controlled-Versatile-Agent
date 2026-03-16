@@ -389,6 +389,12 @@ class MemoryStore:
         return len(self._messages) * 120
 
   def _count_tokens_single(self, message: Dict) -> int:
+    # 截图消息的 base64 会撑爆 token 估算，导致触发不必要的裁剪
+    # 截图在 prepare_for_llm 里会被脱水处理，实际发给 LLM 的不是原始 base64
+    # 所以这里只按固定值计，不实际统计
+    if message.get("_importance") == "SCREENSHOT":
+      return 300  # 脱水后的图片消息约占这个量级
+
     try:
       content = message.get("content", "")
       if isinstance(content, (dict, list)):
@@ -475,14 +481,21 @@ class MemoryStore:
 
           elif artifact.get("artifact_type") == "image":
             if i != last_image_idx:
-              # 如果不是最后一张图，把巨大的 base64 删掉，只留个标记
+              # 非最新截图：删除 base64，只保留路径和时间戳，让模型知道"我截过图"
               artifact["base64"] = "[DEHYDRATED]"
               artifact["is_dehydrated"] = True
               clean["content"] = json.dumps(data, ensure_ascii=False)
+            # 最新截图保留完整 base64，模型需要看到当前屏幕状态
 
         except (json.JSONDecodeError, TypeError, KeyError):
           pass
 
+        result.append(clean)
+        continue
+
+      if tag == "SCREENSHOT":
+        # SCREENSHOT 标记的 assistant 消息（发起截图的那一条）直接保留，不折叠
+        clean = {k: v for k, v in msg.items() if not k.startswith("_")}
         result.append(clean)
         continue
 
@@ -768,6 +781,10 @@ class MemoryStore:
         # 计划确认是锚点
         if inner_data.get("status") == "PLAN_ACCEPTED":
           tagged["_importance"] = "ANCHOR"
+        # 截图单独标记：不参与 token 预算计算，也不触发裁剪
+        # （base64 图片会撑爆 token 估算，导致把其他有用上下文全裁掉）
+        elif inner_data.get("artifact_type") == "image":
+          tagged["_importance"] = "SCREENSHOT"
         # 错误或文件内容是重要决策依据 (DECISION)
         elif data.get("status") == "error" or inner_data.get("artifact_type") == "file_content":
           tagged["_importance"] = "DECISION"
@@ -831,7 +848,10 @@ class MemoryStore:
       print(f"[Memory] ✂️  NOISE 清理：{original_count} → {len(self._messages)} 条")
       return
 
-    process_indices = [i for i, m in enumerate(self._messages) if m.get("_importance") == "PROCESS"]
+    process_indices = [
+      i for i, m in enumerate(self._messages)
+      if m.get("_importance") == "PROCESS"
+    ]
     cutoff = len(process_indices) // 2
     indices_to_remove = set(process_indices[:cutoff])
     self._messages = self._group_remove(self._messages, indices_to_remove)

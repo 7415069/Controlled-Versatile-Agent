@@ -95,6 +95,8 @@ mdurl==0.1.2
     # via markdown-it-py
 mouseinfo==0.1.3
     # via pyautogui
+mss==10.1.0
+    # via -r requirements.in
 multidict==6.7.1
     # via
     #   aiohttp

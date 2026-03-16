@@ -262,9 +262,9 @@ class CvaUltraGui:
     self.logo_label.grid(row=0, column=0, padx=30, pady=(40, 30))
 
     self._create_label(self.sidebar_frame, "配置文件 (YAML)", 1)
-    self.manifest_entry = self._create_entry(self.sidebar_frame, "brtech_cva/roles/developer-v1.yaml", 2)
+    self.manifest_entry = self._create_entry(self.sidebar_frame, "brtech_cva/roles/assistant.yaml", 2)
     self._create_label(self.sidebar_frame, "智能底座 (LiteLLM)", 3)
-    self.model_entry = self._create_entry(self.sidebar_frame, "deepseek/deepseek-chat", 4)
+    self.model_entry = self._create_entry(self.sidebar_frame, "zai/glm-4.6v", 4)
 
     self.start_btn = ctk.CTkButton(
         self.sidebar_frame, text="启动系统", height=45,

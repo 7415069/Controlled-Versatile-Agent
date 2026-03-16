@@ -149,6 +149,11 @@ class UniversalShell:
         break
       try:
         self._escalation.cleanup_expired_permissions()
+        pending = self._escalation.get_pending_requests()
+        if pending:
+          print(f"[CVA] ⚠️ 当前有 {len(pending)} 个审批请求待处理：")
+          for req in pending:
+            print(f"       · {req.tool_name}({req.requested_path}) [{req.permission_type}]")
       except Exception as e:
         print(f"[CVA] ⚠️ 自动清理线程异常: {e}")
 
@@ -222,6 +227,9 @@ class UniversalShell:
         for tc in response.tool_calls:
           tr = self._dispatch_tool(tc.name, tc.input, tc.id)
           self._memory.append(tr)
+        pending = self._escalation.get_pending_requests()
+        if len(pending) >= 3:
+          print(f"\n[CVA] ⚠️ 有 {len(pending)} 个越权申请待审批，Agent 可能陷入等待循环，建议检查审批队列。")
         continue
 
       if response.finish_reason == "length":

@@ -7,4 +7,5 @@ hypothesis
 pathspec
 customtkinter
 pyautogui
+mss
 pillow

@@ -25,6 +25,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, List, Type
 
+import mss
 import pyautogui
 from PIL import Image, ImageDraw
 
@@ -1005,125 +1006,129 @@ class SynthesizeTool(Tool):
 
 
 class ScreenshotTool(Tool):
-  """高级屏幕截图工具：支持虚拟鼠标绘制与等比例填充"""
   name = "take_screenshot"
-  description = "获取当前屏幕截图。图片会自动处理为 1024x1024 坐标系，并标注当前鼠标位置。"
+  description = "获取当前屏幕截图。用于在操作前观察环境，或在操作后确认状态。"
 
   def execute(self, reason: str = "观察屏幕状态", **kwargs):
+    # 将截图逻辑抽离出来，方便复用
+    return self._do_screenshot(reason, **kwargs)
+
+  def _do_screenshot(self, reason: str, **kwargs):
     allowed, msg = self._check(self.name, "screenshot", "gui_control", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
     try:
-      # 1. 获取原始全屏截图
-      screenshot = pyautogui.screenshot()
-      sw, sh = screenshot.size
-
-      # 2. 获取当前鼠标位置
       mx, my = pyautogui.position()
+      with mss.mss() as sct:
+        target_monitor = sct.monitors[1]
+        for m in sct.monitors[1:]:
+          if m['left'] <= mx <= m['left'] + m['width'] and \
+              m['top'] <= my <= m['top'] + m['height']:
+            target_monitor = m
+            break
 
-      # 3. 在截图上绘制一个虚拟鼠标（红点），方便 LLM 感知位置
-      draw = ImageDraw.Draw(screenshot)
-      radius = 10
-      draw.ellipse((mx - radius, my - radius, mx + radius, my + radius), fill="red", outline="white")
+        sct_img = sct.grab(target_monitor)
+        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
-      # 4. 等比例缩放至 1024 边长 (Letterbox 处理)
-      # 这样 LLM 看到的 (512, 512) 永远是图片中心，也对应屏幕中心
-      target_size = 1024
-      ratio = min(target_size / sw, target_size / sh)
-      new_w, new_h = int(sw * ratio), int(sh * ratio)
+        # 绘制鼠标位置
+        rx, ry = mx - target_monitor['left'], my - target_monitor['top']
+        draw = ImageDraw.Draw(img)
+        radius = 12
+        draw.ellipse((rx - radius, ry - radius, rx + radius, ry + radius), fill="red", outline="white", width=2)
 
-      # 使用高质量缩放算法
-      resized_img = screenshot.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        # 缩放以节省 Token
+        sw, sh = img.size
+        max_side = 1024
+        if sw > sh:
+          new_w, new_h = max_side, int(sh * (max_side / sw))
+        else:
+          new_h, new_w = max_side, int(sw * (max_side / sh))
+        resized_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-      # 创建 1024x1024 的黑色背景画布
-      final_canvas = Image.new("RGB", (target_size, target_size), (0, 0, 0))
-      # 将缩放后的图片居中贴上去
-      offset_x = (target_size - new_w) // 2
-      offset_y = (target_size - new_h) // 2
-      final_canvas.paste(resized_img, (offset_x, offset_y))
+        timestamp = int(time.time())
+        save_path = Path(f"var/artifacts/screenshot_{timestamp}.jpg")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        resized_img.save(save_path, "JPEG", quality=85)
 
-      # 5. 保存与转码
-      timestamp = int(time.time())
-      save_path = Path(f"var/artifacts/screenshot_{timestamp}.jpg")
-      save_path.parent.mkdir(parents=True, exist_ok=True)
-      final_canvas.save(save_path, "JPEG", quality=85)  # 质量 85 是体积与清晰度的平衡点
+        buffered = BytesIO()
+        resized_img.save(buffered, format="JPEG", quality=85)
+        img_str = base64.b64encode(buffered.getvalue()).decode()
 
-      buffered = BytesIO()
-      final_canvas.save(buffered, format="JPEG", quality=85)
-      img_str = base64.b64encode(buffered.getvalue()).decode()
-
-      return {
-        "status": "ok",
-        "data": {
-          "artifact_type": "image",
-          "path": str(save_path),
-          "base64": img_str,
-          "size": [target_size, target_size],
-          "real_screen_size": [sw, sh],
-          "can_dehydrate": True
+        return {
+          "status": "ok",
+          "data": {
+            "artifact_type": "image",
+            "path": str(save_path),
+            "base64": img_str,
+            "viewport": [new_w, new_h],
+            "coordinate_system": "0-1000",
+            "message": "已获取当前屏幕状态，请根据此图判断操作是否成功。"
+          }
         }
-      }
     except Exception as e:
-      return {"status": "error", "message": str(e)}
+      return err("SCREENSHOT_ERROR", str(e))
 
 
 class ComputerControlTool(Tool):
-  """计算机控制工具：模拟鼠标键盘"""
+  """
+  原始的多合一控制工具，保留作为兼容入口。
+  GLM-4 等 function calling 能力较弱的模型请改用拆分后的专用工具：
+    mouse_click / mouse_double_click / keyboard_type / keyboard_key / mouse_scroll
+  """
   name = "computer_control"
-  description = "控制鼠标和键盘。坐标系固定为 1024x1024，系统会自动映射到真实屏幕像素。"
+  description = (
+    "控制鼠标和键盘。注意：本工具在执行动作后会【自动返回一张操作后的截图】。"
+    "你必须通过这张截图确认你的动作（如打开浏览器、点击按钮）是否产生了预期的 UI 变化。"
+    "如果截图显示没有变化，说明操作失败，请尝试其他方法（如改用鼠标点击而非快捷键）。"
+  )
   input_schema = {
     "type": "object",
     "properties": {
       "action": {
         "type": "string",
         "enum": ["move", "click", "double_click", "right_click", "type", "key", "scroll"],
-        "description": "执行的动作类型"
+        "description": "动作类型"
       },
-      "x": {"type": "integer", "description": "1024坐标系下的横坐标 (0-1024)"},
-      "y": {"type": "integer", "description": "1024坐标系下的纵坐标 (0-1024)"},
-      "text": {"type": "string", "description": "type 动作输入的文本"},
-      "key": {"type": "string", "description": "key 动作按下的键名"},
-      "reason": {"type": "string", "description": "执行此操作的原因"}
+      "x": {"type": "integer", "description": "归一化横坐标 (0-1000)"},
+      "y": {"type": "integer", "description": "归一化纵坐标 (0-1000)"},
+      "text": {"type": "string", "description": "输入文本"},
+      "key": {"type": "string", "description": "按键名 (如 'enter', 'meta+t', 'backspace')"},
+      "wait_ms": {"type": "integer", "description": "动作执行后等待多少毫秒再截图确认 (默认 500ms，打开应用建议 2000ms)", "default": 500},
+      "reason": {"type": "string", "description": "操作原因及预期结果"}
     },
     "required": ["action", "reason"]
   }
 
-  def execute(self, action: str, x: int = None, y: int = None, text: str = None, key: str = None, reason: str = "", **kwargs):
+  def execute(self, action: str, x: int = None, y: int = None, text: str = None,
+      key: str = None, wait_ms: int = 500, reason: str = "", **kwargs):
+
     target_desc = f"{action}(x={x}, y={y}, text={text}, key={key})"
     allowed, msg = self._check(self.name, target_desc, "gui_control", reason, self._ctx(kwargs))
     if not allowed:
       return err("PERMISSION_DENIED", msg)
 
     try:
-      pyautogui.PAUSE = 0.2
+      pyautogui.PAUSE = 0.1
+      mx, my = pyautogui.position()
+      real_x, real_y = mx, my
 
-      # --- 核心映射逻辑开始 ---
-      # 1. 获取真实屏幕尺寸 (例如 1920x1080)
-      sw, sh = pyautogui.size()
+      with mss.mss() as sct:
+        target_monitor = sct.monitors[1]
+        for m in sct.monitors[1:]:
+          if m['left'] <= mx <= m['left'] + m['width'] and \
+              m['top'] <= my <= m['top'] + m['height']:
+            target_monitor = m
+            break
 
-      # 2. 计算截图时使用的缩放比例和偏移量 (必须与 ScreenshotTool 逻辑完全一致)
-      target_canvas_size = 1024
-      ratio = min(target_canvas_size / sw, target_canvas_size / sh)
+        if x is not None and y is not None:
+          real_x = target_monitor['left'] + int((x / 1000.0) * target_monitor['width'])
+          real_y = target_monitor['top'] + int((y / 1000.0) * target_monitor['height'])
+          real_x = max(target_monitor['left'], min(target_monitor['left'] + target_monitor['width'] - 1, real_x))
+          real_y = max(target_monitor['top'], min(target_monitor['top'] + target_monitor['height'] - 1, real_y))
 
-      offset_x = (target_canvas_size - (sw * ratio)) // 2
-      offset_y = (target_canvas_size - (sh * ratio)) // 2
-
-      # 3. 将 LLM 传来的坐标 (x, y) 映射回真实像素
-      real_x, real_y = None, None
-      if x is not None and y is not None:
-        # 公式：真实像素 = (LLM坐标 - 偏移量) / 缩放比例
-        real_x = int((x - offset_x) / ratio)
-        real_y = int((y - offset_y) / ratio)
-
-        # 边界检查：防止点到屏幕外面
-        real_x = max(0, min(sw - 1, real_x))
-        real_y = max(0, min(sh - 1, real_y))
-      # --- 核心映射逻辑结束 ---
-
-      # 执行动作
       if action == "move":
-        pyautogui.moveTo(real_x, real_y)
+        pyautogui.moveTo(real_x, real_y, duration=0.2)
       elif action == "click":
         pyautogui.click(real_x, real_y)
       elif action == "double_click":
@@ -1133,14 +1138,191 @@ class ComputerControlTool(Tool):
       elif action == "type":
         pyautogui.write(text, interval=0.05)
       elif action == "key":
-        pyautogui.press(key)
+        k = key.lower() if key else ""
+        if k == "return":
+          k = "enter"
+        pyautogui.press(k)
       elif action == "scroll":
-        # 这里的 x 被复用为滚动量
-        pyautogui.scroll(x if x else -10)
+        pyautogui.scroll(x if x is not None else -10)
 
-      return ok({"message": f"已在真实坐标 ({real_x}, {real_y}) 执行 {action}"})
+      time.sleep(wait_ms / 1000.0)
+
+      scr_tool = ScreenshotTool(self._check, self._input_fn)
+      scr_result = scr_tool._do_screenshot(reason=f"确认动作结果: {target_desc}")
+
+      if scr_result["status"] == "ok":
+        scr_result["data"]["message"] = f"已执行 {action}。这是操作后的屏幕截图，请确认是否符合预期。"
+        return scr_result
+      else:
+        return ok({"message": f"已执行 {action}，但截图失败: {scr_result.get('message')}"})
+
     except Exception as e:
       return err("GUI_ERROR", str(e))
+
+  def _do_action_and_screenshot(self, action_fn, action_desc: str, wait_ms: int):
+    """公共的执行+截图逻辑，供子类复用"""
+    try:
+      action_fn()
+      time.sleep(wait_ms / 1000.0)
+      scr_tool = ScreenshotTool(self._check, self._input_fn)
+      scr_result = scr_tool._do_screenshot(reason=f"确认动作结果: {action_desc}")
+      if scr_result["status"] == "ok":
+        scr_result["data"]["message"] = f"已执行 {action_desc}。这是操作后的屏幕截图，请确认是否符合预期。"
+        return scr_result
+      return ok({"message": f"已执行 {action_desc}，但截图失败"})
+    except Exception as e:
+      return err("GUI_ERROR", str(e))
+
+  @staticmethod
+  def _map_coords(x: int, y: int):
+    """把归一化坐标 (0-1000) 映射到屏幕真实像素坐标"""
+    with mss.mss() as sct:
+      mx, my = pyautogui.position()
+      target_monitor = sct.monitors[1]
+      for m in sct.monitors[1:]:
+        if m['left'] <= mx <= m['left'] + m['width'] and \
+            m['top'] <= my <= m['top'] + m['height']:
+          target_monitor = m
+          break
+      real_x = target_monitor['left'] + int((x / 1000.0) * target_monitor['width'])
+      real_y = target_monitor['top'] + int((y / 1000.0) * target_monitor['height'])
+      real_x = max(target_monitor['left'], min(target_monitor['left'] + target_monitor['width'] - 1, real_x))
+      real_y = max(target_monitor['top'], min(target_monitor['top'] + target_monitor['height'] - 1, real_y))
+      return real_x, real_y
+
+
+class MouseClickTool(Tool):
+  """
+  鼠标点击。schema 极简，只有三个字段，专为 GLM-4 等 function calling 较弱的模型设计。
+  坐标使用归一化值 0-1000，0 是屏幕左/上边缘，1000 是右/下边缘。
+  """
+  name = "mouse_click"
+  description = "鼠标左键单击指定位置。执行后自动返回屏幕截图供你确认结果。坐标范围 0-1000（归一化）。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "x": {"type": "integer", "description": "横坐标 0-1000"},
+      "y": {"type": "integer", "description": "纵坐标 0-1000"},
+      "reason": {"type": "string", "description": "点击原因"}
+    },
+    "required": ["x", "y", "reason"]
+  }
+
+  def execute(self, x: int, y: int, reason: str = "", **kwargs):
+    allowed, msg = self._check(self.name, f"click({x},{y})", "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+    real_x, real_y = ComputerControlTool._map_coords(x, y)
+    ctrl = ComputerControlTool(self._check, self._input_fn)
+    return ctrl._do_action_and_screenshot(
+        lambda: pyautogui.click(real_x, real_y),
+        f"click({x},{y})", 500
+    )
+
+
+class MouseDoubleClickTool(Tool):
+  """鼠标左键双击指定位置。"""
+  name = "mouse_double_click"
+  description = "鼠标左键双击指定位置。执行后自动返回截图。坐标范围 0-1000（归一化）。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "x": {"type": "integer", "description": "横坐标 0-1000"},
+      "y": {"type": "integer", "description": "纵坐标 0-1000"},
+      "reason": {"type": "string", "description": "双击原因"}
+    },
+    "required": ["x", "y", "reason"]
+  }
+
+  def execute(self, x: int, y: int, reason: str = "", **kwargs):
+    allowed, msg = self._check(self.name, f"double_click({x},{y})", "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+    real_x, real_y = ComputerControlTool._map_coords(x, y)
+    ctrl = ComputerControlTool(self._check, self._input_fn)
+    return ctrl._do_action_and_screenshot(
+        lambda: pyautogui.doubleClick(real_x, real_y),
+        f"double_click({x},{y})", 500
+    )
+
+
+class KeyboardTypeTool(Tool):
+  """在当前焦点位置输入文字。"""
+  name = "keyboard_type"
+  description = "在当前焦点输入框中输入文字。执行后自动返回截图。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "text": {"type": "string", "description": "要输入的文字"},
+      "reason": {"type": "string", "description": "输入原因"}
+    },
+    "required": ["text", "reason"]
+  }
+
+  def execute(self, text: str, reason: str = "", **kwargs):
+    allowed, msg = self._check(self.name, f"type({text[:20]})", "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+    ctrl = ComputerControlTool(self._check, self._input_fn)
+    return ctrl._do_action_and_screenshot(
+        lambda: pyautogui.write(text, interval=0.05),
+        f"type({text[:20]})", 300
+    )
+
+
+class KeyboardKeyTool(Tool):
+  """按下快捷键或功能键。"""
+  name = "keyboard_key"
+  description = (
+    "按下快捷键或功能键。执行后自动返回截图。"
+    "常用示例：'enter'=回车, 'ctrl+t'=新标签页, 'ctrl+l'=聚焦地址栏, "
+    "'ctrl+w'=关闭标签, 'f5'=刷新, 'escape'=取消, 'backspace'=退格。"
+  )
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "key": {"type": "string", "description": "按键名，如 'enter', 'ctrl+t', 'ctrl+l', 'f5'"},
+      "reason": {"type": "string", "description": "按键原因"}
+    },
+    "required": ["key", "reason"]
+  }
+
+  def execute(self, key: str, reason: str = "", **kwargs):
+    allowed, msg = self._check(self.name, f"key({key})", "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+    k = key.lower().strip()
+    if k == "return":
+      k = "enter"
+    ctrl = ComputerControlTool(self._check, self._input_fn)
+    return ctrl._do_action_and_screenshot(
+        lambda: pyautogui.hotkey(*k.split('+')) if '+' in k else pyautogui.press(k),
+        f"key({key})", 800
+    )
+
+
+class MouseScrollTool(Tool):
+  """鼠标滚轮滚动。"""
+  name = "mouse_scroll"
+  description = "滚动鼠标滚轮。amount 为正数向上滚，负数向下滚，通常 ±3 到 ±10。执行后自动返回截图。"
+  input_schema = {
+    "type": "object",
+    "properties": {
+      "amount": {"type": "integer", "description": "滚动量，正数向上，负数向下"},
+      "reason": {"type": "string", "description": "滚动原因"}
+    },
+    "required": ["amount", "reason"]
+  }
+
+  def execute(self, amount: int, reason: str = "", **kwargs):
+    allowed, msg = self._check(self.name, f"scroll({amount})", "gui_control", reason, self._ctx(kwargs))
+    if not allowed:
+      return err("PERMISSION_DENIED", msg)
+    ctrl = ComputerControlTool(self._check, self._input_fn)
+    return ctrl._do_action_and_screenshot(
+        lambda: pyautogui.scroll(amount),
+        f"scroll({amount})", 300
+    )
 
 
 # ─── 工具注册表 ───────────────────────────────────────────────

@@ -174,6 +174,8 @@ class EscalationManager:
 
   def _classify_risk_level(self, tool_name: str, target: str, permission_type: str) -> str:
     target_lower = target.lower()
+
+    # HIGH：破坏性命令关键词 + 敏感信息关键词——这是安全地基，与角色无关
     high_indicators = [
       tool_name == "execute_python_script",
       (tool_name == "run_shell" and any(
@@ -189,9 +191,14 @@ class EscalationManager:
         return "HIGH"
       return "MEDIUM"
 
-    safe_prefixes = ["./core", "./tests", "./docs", "./agent_workspace", "./roles"]
+    # LOW：只读操作 + 命中角色定义的低风险路径前缀
+    # safe_prefixes 不再硬编码在底座里，改由各角色 yaml 的
+    # escalation_policy.low_risk_prefixes 字段定义，底座不做任何业务假设。
     is_read_only = permission_type in ("read", "list")
-    in_safe_dir = any(target.startswith(p) for p in safe_prefixes)
+    in_safe_dir = any(
+        target.startswith(p) for p in self._policy.low_risk_prefixes
+    ) if self._policy.low_risk_prefixes else False
+
     if is_read_only and in_safe_dir:
       return "LOW"
 
@@ -249,6 +256,44 @@ class EscalationManager:
           "target": record.requested_path,
           "expired_at": record.expires_at
         })
+
+      grace_seconds = self._policy.timeout_seconds * 2
+      stale_ids = []
+      for req_id, req in self._pending.items():
+        if req.status != EscalationStatus.PENDING:
+          stale_ids.append(req_id)  # 已有终态（APPROVED/DENIED 等），直接移除
+          continue
+        try:
+          created_at = datetime.fromisoformat(req.timestamp)
+          age = (datetime.now(timezone.utc) - created_at).total_seconds()
+          if age > grace_seconds:
+            req.status = EscalationStatus.TIMEOUT
+            req.decision_time = datetime.now(timezone.utc).isoformat()
+            req.deny_reason = f"PENDING 请求超过宽限期 {grace_seconds}s，自动超时拒绝"
+            stale_ids.append(req_id)
+            self._audit("PENDING_REQUEST_TIMEOUT", {
+              "request_id": req_id,
+              "tool_name": req.tool_name,
+              "target": req.requested_path,
+              "age_seconds": round(age, 1),
+            })
+        except Exception:
+          stale_ids.append(req_id)
+
+      for req_id in stale_ids:
+        self._pending.pop(req_id, None)
+
+  def get_pending_requests(self) -> List[EscalationRequest]:
+    """返回当前所有待审批的越权申请。
+
+    用途（不只是测试）：
+      - GUI 审批面板：主线程轮询此列表，渲染待处理请求供用户点击批准/拒绝
+      - shell 主循环：判断是否有请求堆积，决定是否需要暂停继续执行
+      - 监控/日志：外部观察者查询当前积压的审批数量
+    """
+    with self._lock:
+      return [req for req in self._pending.values()
+              if req.status == EscalationStatus.PENDING]
 
   def get_approval_history(self) -> List[ApprovalRecord]:
     with self._lock:

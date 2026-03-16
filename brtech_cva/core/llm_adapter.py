@@ -7,6 +7,7 @@ LiteLLM 适配层（LLM Adapter）v3.3
 
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -171,23 +172,35 @@ class LLMAdapter:
   def _do_chat_call(self, messages, system_prompt, tools, max_tokens, temperature):
     processed_messages = []
     for msg in messages:
-      # 如果是工具返回的图片结果
+      # 截图在 tool 消息里，但绝大多数模型（包括 GLM-4V）不接受 role=tool 里带图片。
+      # 处理策略：
+      #   1. tool 消息保留，但把 base64 替换成占位文本（保持 tool_call_id 配对完整）
+      #   2. 如果 base64 未被脱水（即是最新截图），紧跟其后插入一条 role=user 的图片消息
       if msg["role"] == "tool" and '"artifact_type": "image"' in str(msg["content"]):
         try:
-          import json
           data = json.loads(msg["content"])
-          b64 = data["data"]["base64"]
-          # 转换为多模态格式 [关键！]
+          b64 = data["data"].get("base64", "")
+          is_dehydrated = data["data"].get("is_dehydrated", False) or b64 == "[DEHYDRATED]"
+
+          # tool 消息：把 base64 替换为占位符，避免把巨大 base64 塞进 tool role
+          data["data"]["base64"] = "[图片已单独发送]"
           processed_messages.append({
             "role": "tool",
             "tool_call_id": msg["tool_call_id"],
-            "content": [
-              {"type": "text", "text": "这是当前的屏幕截图："},
-              {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-            ]
+            "content": json.dumps(data, ensure_ascii=False)
           })
+
+          # 只有未脱水的最新截图才需要真正发图
+          if not is_dehydrated and b64 and b64 != "[DEHYDRATED]":
+            processed_messages.append({
+              "role": "user",
+              "content": [
+                {"type": "text", "text": "[截图] 以上工具操作后的屏幕状态："},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+              ]
+            })
           continue
-        except:
+        except Exception:
           pass
       processed_messages.append(msg)
     full_messages = [{"role": "system", "content": system_prompt}] + processed_messages
@@ -250,6 +263,9 @@ class LLMAdapter:
       return LLMError(LLMErrorType.RATE_LIMIT, str(exception))
     if 'timeout' in msg:
       return LLMError(LLMErrorType.TIMEOUT, str(exception))
+    # 图片格式错误：重试没意义，直接标为 INVALID_REQUEST 跳出重试循环
+    if '图片' in msg or 'image' in msg or 'vision' in msg:
+      return LLMError(LLMErrorType.INVALID_REQUEST, str(exception))
     return LLMError(LLMErrorType.UNKNOWN_ERROR, str(exception))
 
   def _parse_response(self, response):
@@ -259,9 +275,17 @@ class LLMAdapter:
     if hasattr(msg, "tool_calls") and msg.tool_calls:
       for tc in msg.tool_calls:
         try:
-          args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
+          raw_args = tc.function.arguments
+          if isinstance(raw_args, str):
+            cleaned_args_str = self._clean_hallucinated_xml(raw_args)
+            args = json.loads(cleaned_args_str)
+          else:
+            args = raw_args
+
+          args = self._clean_dict_values(args)
           tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, input=args))
-        except Exception:
+        except Exception as e:
+          logger.error(f"解析工具参数失败: {e}, 原始数据: {tc.function.arguments}")
           pass
     usage = {"total_tokens": getattr(response.usage, "total_tokens", 0)}
     return LLMResponse(
@@ -274,8 +298,12 @@ class LLMAdapter:
   def _parse_structured_response(self, response):
     try:
       args = response.choices[0].message.tool_calls[0].function.arguments
-      return json.loads(args) if isinstance(args, str) else args
-    except Exception:
+      if isinstance(args, str):
+        args = self._clean_hallucinated_xml(args)
+        args = json.loads(args)
+      return self._clean_dict_values(args)
+    except Exception as e:
+      logger.error(f"解析结构化响应失败: {e}")
       return None
 
   def _update_stats(self, resp, err, rtime):
@@ -290,6 +318,34 @@ class LLMAdapter:
         self._stats.failed_calls += 1
         if err:
           self._stats.error_counts[err.error_type] = self._stats.error_counts.get(err.error_type, 0) + 1
+
+  def _clean_hallucinated_xml(self, text: str) -> str:
+    """
+    专门针对 GLM 等模型产生的 <arg_key> 这种 XML 幻觉进行清洗
+    """
+    if not text:
+      return ""
+
+    # 1. 移除 <arg_key>key</arg_key> 这种标签，只保留中间的内容
+    # 匹配 <arg_key>内容</arg_key> 并替换为 内容
+    text = re.sub(r'<arg_key>(.*?)</arg_key>', r'\1', text)
+    text = re.sub(r'<arg_value>(.*?)</arg_value>', r'\1', text)
+
+    # 2. 移除残留的孤立标签
+    text = re.sub(r'</?arg_.*?>', '', text)
+
+    # 3. 修复模型可能在 JSON 字段名里塞进换行符的问题
+    # 比如 "action": "key\n" -> "action": "key"
+    return text.strip()
+
+  def _clean_dict_values(self, d):
+    if isinstance(d, dict):
+      return {k: self._clean_dict_values(v) for k, v in d.items()}
+    elif isinstance(d, list):
+      return [self._clean_dict_values(v) for v in d]
+    elif isinstance(d, str):
+      return self._clean_hallucinated_xml(d)
+    return d
 
 
 def _convert_tools_to_litellm(tools):

@@ -14,6 +14,7 @@ class EscalationPolicy:
   auto_deny_patterns: List[str] = field(default_factory=list)
   notify_channel: str = "console"  # console | slack | webhook
   timeout_seconds: int = 300  # 超时后自动拒绝
+  low_risk_prefixes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -104,6 +105,7 @@ def load_manifest(path: str) -> RoleManifest:
       auto_deny_patterns=esc_raw.get("auto_deny_patterns", []),
       notify_channel=esc_raw.get("notify_channel", "console"),
       timeout_seconds=esc_raw.get("timeout_seconds", 300),
+      low_risk_prefixes=esc_raw.get("low_risk_prefixes", []),
   )
 
   manifest = RoleManifest(
